@@ -80,6 +80,19 @@
     
 8. **Outputs**
 
+```
+main_controller():
+	particle_ids = simba.select_halo_particle_ids()
+	redshift = simba.get_redshift()
+	
+	emissivity = config["emissivity"]     # read from .config
+	
+	result = run_line_emission_pipeline()
+		gas_fields = simba.load_physical_gas_fields()
+		emission = calculate_particle_line_luminosity()
+		result = make_xxv_cube()
+```
+
 ---
 ## Extra Notes
 
