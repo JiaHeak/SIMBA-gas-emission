@@ -1,0 +1,29 @@
+{
+  "input_source": "simba",
+  "snapshot_filename": "/path/to/snapshot.hdf5",
+  "selection": {
+    "type": "caesar_host_halo",
+    "catalogue_filename": "/path/to/caesar_catalogue.hdf5",
+    "target_galaxy_idx": 0
+  },
+  "emissivity": {
+    "type": "ps20",
+    "table_filename": "/path/to/ps20_emissivity.hdf5",
+    "line_label": "exact IdentifierLines label"
+  },
+  "unit_factors": {
+    "position_to_physical_kpc": null,
+    "velocity_to_kms": null,
+    "mass_to_g": null,
+    "density_to_g_cm3": null,
+    "specific_energy_to_erg_g": null,
+    "z_sun_mass_fraction": null
+  },
+  "center_kpc": [null, null, null],
+  "x_edges_kpc": [-100, 0, 100],
+  "y_edges_kpc": [-100, 0, 100],
+  "velocity_edges_kms": [-300, 0, 300],
+  "los_axis": "z",
+  "systemic_velocity_kms": 0,
+  "output_filename": "line_cube.npz"
+}

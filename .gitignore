@@ -1,0 +1,10 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.venv/
+venv/
+*.npz
+*.h5
+*.hdf5
+!tests/data/sample_snapshot.hdf5
