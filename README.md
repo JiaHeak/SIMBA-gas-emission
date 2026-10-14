@@ -1,139 +1,96 @@
-# Pipeline for SIMBA Line Emission Data Cube
-## Scientific Purposes
+# SIMBA CGM line-emission pipeline
 
----
-## Workflow
-### Proposed Pipeline
+## Purpose
 
-1. **Grid initialization**
-    
-    **Action:** Define the spatial and spectral boundaries of the volume of interest.
-    
-    **Dimensions:** Initialize a 3D array: [X, Y, Z].
-    • `X, Y`: 2D spatial coordinates (projected physical distance, e.g., kiloparsecs or arcseconds).
-    • `Z`: Spectral/Velocity space ($\Delta v$ in km/s).
-    
-2. **Ion fraction calculation (with `Trident` or `PyGad`)**
-    
-    **Action:** Determine the fractions of each ion per gas particle. 
-    
-    **The Math:** Interpolate these particle values against a pre-computed grid (usually from **Cloudy**).
-    
-3. **Emissivity calculation**
-    
-    **Action:** Determine how much light each gas particle actually emits, based on gas properties.
-    
-    **Input Data:** Extract `PartType0` (Gas) properties from the SIMBA snapshot:
-    • Number Density ($n$)
-    • Internal Energy $\rightarrow$ Temperature (T)
-    • Metallicity ($Z$)
-    
-    **Processes:**
-    
-    1. Gravitational cooling → collisional ionization/excitation
-    2. Photoionization (UV background, nearby young stars) → recombination
-    
-    **Output Data:** Derived emissivity per particle in the volume.
-    
-    **The Math:** $\epsilon = \epsilon(n, T, Z)$
-    
-4. **SPH kernel projection/deposition (likely with `yt`)**
-    
-    **Action:** Map the discrete 3D particles onto the 3D grid.
-    
-    **Spatial Splatting:**
-    • Use the particle's smoothing length (h) and an SPH kernel function (e.g., cubic spline).
-    • Distribute the particle's total emitted luminosity across the overlapping [X,Y] spatial pixels.
-    
-    **Spectral Splatting:**
-    • Extract the particle's peculiar velocity vector.
-    • Doppler-shift the emission to the correct velocity bin (Z-axis).
-    • Apply thermal broadening based on the particle's temperature (Gaussian width).
-    
-5. **Emissivity to Surface Brightness**
-    
-    **Action:** Determine how many fluxes travel to the observer.
-    
-    **The Math:** Emissivity → intrinsic Luminosity → observed Flux, $F = \frac{L}{4\pi D_L^2}$
-    
-6. **Dust attenuation (Monte Carlo radiative transfer) (`SKIRT`)**
-    
-    **Action:** Account for the light lost as it travels out of the galaxy.
-    
-    **Method:** Integrate the dust density along the line of sight from the particle to the observer.
-    
-    **The Math:** Apply a dust extinction curve (e.g., Calzetti or Cardelli) to calculate the optical depth of the dust $\tau_{dust}$.
-    
-    **Correction:** Attenuate the emitted flux: $F_{obs} = F_{emit} \times e^{-\tau_{dust}}$.
-    
-    **Further concerns:** How do dust sizes and compositions affect the attenuation?
-    
-7. **Instrument convolution (mocking the telescopes)**
-    
-    **Action:** Degrade the perfect theoretical datacube to match realistic telescope limitations.
-    
-    **Spatial Blur (Seeing):** Convolve the [X,Y] spatial slices with the telescope's Point Spread Function (PSF).
-    
-    **Spectral Blur (Resolution):** Convolve the Z-velocity axis with the spectrograph's Line Spread Function (LSF).
-    
-    **Noise:** Add Gaussian or Poisson noise to mimic realistic Signal-to-Noise Ratios (SNR) based on expected E-ELT exposure times.
-    
-8. **Outputs**
+This project develops a workflow for connecting gas in the circum-galactic medium (CGM) to observable emission-line maps and data cubes. The scientific goal is to relate line emission to gas conditions and the baryon cycle, then make predictions that can be compared with observations.
 
-```
-main_controller():
-	particle_ids = simba.select_halo_particle_ids()
-	redshift = simba.get_redshift()
-	
-	emissivity = config["emissivity"]     # read from .config
-	
-	result = run_line_emission_pipeline()
-		gas_fields = simba.load_physical_gas_fields()
-		emission = calculate_particle_line_luminosity()
-		result = make_xxv_cube()
+## Flowchart at a glance
+
+This is a general scientific workflow, not a map of one particular code implementation. Solid arrows show the main analysis sequence; dashed boxes and arrows indicate optional methods, sensitivity experiments, or future development.
+
+```mermaid
+flowchart TD
+    A[Snapshot + Catalogue] --> B[Choose target galaxy / halo]
+    B --> C[Select gas and define the CGM region]
+    C --> D[Read fields and derive physical gas state]
+    D --> E[Quality checks: units, abundances, grid coverage]
+    E --> F[Ionization and line-emissivity model]
+    F --> G[Particle emissivity / luminosity]
+    G --> H[Project along a chosen line of sight]
+    H --> I[Intrinsic 2D map or 3D spectral cube]
+    I --> J[Analyze tracers and compare with observations]
+
+    K[Cloudy-based emissivity grid] -. model option .-> F
+    L[Ion-fraction tool + emission calculation] -. model option .-> F
+    M[Other validated ionization / emission model] -. model option .-> F
+    D -. optional .-> N[Particle tracking: inflows, outflows, recycling]
+    D -. sensitivity test only .-> O[Assumed metallicity / toy gas phases]
+    O -. synthetic scenario .-> F
+    H -. future .-> P[Spatial kernel + thermal / velocity broadening]
+    I -. future .-> Q[Dust radiative transfer MCRT]
+    Q -. future .-> R[Instrument PSF / LSF + noise]
+    R -. observation-like product .-> J
+
+    classDef data fill:#e7f0fa,stroke:#4d7ea8,color:#17324d;
+    classDef core fill:#eaf4e3,stroke:#70ad47,color:#315623;
+    classDef model fill:#f2f2f2,stroke:#7f8c8d,color:#404040,stroke-dasharray:5 5;
+    classDef explore fill:#fce4d6,stroke:#c55a11,color:#843c0c,stroke-dasharray:5 5;
+    classDef future fill:#eee8f5,stroke:#8064a2,color:#403152,stroke-dasharray:5 5;
+    class A,B,C,D,E data;
+    class F,G,H,I,J core;
+    class K,L,M,N model;
+    class O explore;
+    class P,Q,R future;
 ```
 
----
-## Extra Notes
+## Configuration and running
 
-## Running the current controller
-
-Copy `config.example.json`, replace its paths, physical unit factors, center,
-line label, and bin edges, then run from the project root:
+Copy `Pipeline/config.example.json`, then set the snapshot and catalogue paths, table path, target galaxy index, verified unit factors, center, line label, bin edges, and output path. Run from the repository root:
 
 ```bash
 python Pipeline/scr/pipeline.py Pipeline/your_config.json
 ```
 
-The controller uses `input_source` to choose a gas adapter and
-`emissivity.type` to choose an emissivity-table adapter. Currently, the
-implemented choices are `simba` and `ps20`. Adding another source or table
-requires an adapter with the same output fields; after that, a run selects it
-in the JSON configuration.
+The example selects a CAESAR host halo. To select only a galaxy's gas membership, set `selection.type` to `caesar_galaxy`. The supported input source is currently `simba`; the supported emissivity-table adapter is currently `ps20`.
 
-Simulation inputs live in sibling modules such as `scr/simba.py`. A future
-`scr/eagle.py` or `scr/illustris.py` can provide `select_particle_ids`,
-`load_physical_gas_fields`, and `get_redshift`, then be registered in
-`SOURCE_MODULES` in `scr/pipeline.py`. The older `scr/gas_sources.py` is
-retained for comparison and is no longer used by the active controller.
+The output is a compressed `.npz` file. Load it with:
 
-`selection.type` can be `caesar_host_halo` as shown in the example. CAESAR
-provides snapshot row indices; the SIMBA adapter translates those to
-`ParticleIDs` before the main pipeline reads gas fields. To start from a saved
-NumPy array of IDs instead, use:
+```python
+import numpy as np
 
-```json
-"selection": {
-  "type": "particle_ids_file",
-  "filename": "/path/to/particle_ids.npy"
-}
+with np.load("line_cube.npz") as result:
+    cube = result["cube_erg_s"]
+    x_edges = result["image_x_edges_kpc"]
+    y_edges = result["image_y_edges_kpc"]
+    velocity_edges = result["velocity_edges_kms"]
 ```
 
-The controller uses each selected ParticleID once. A repeated ID in the
-selection is removed before calculating emissivity, so it cannot contribute
-twice to the cube. The output records the number removed.
+## Development roadmap
 
-The result is a compressed `.npz` file containing `cube_erg_s` in
-`(velocity, image_y, image_x)` order, its bin edges, and run metadata. The
-cube is an intrinsic particle-luminosity sum with no spatial smoothing,
-thermal broadening, dust attenuation, or instrument model yet.
+Recommended additions, each with explicit validation before scientific interpretation:
+
+1. Define the CGM aperture and ISM exclusion relative to the CAESAR galaxy center and a documented halo radius.
+2. Validate unit conversions, abundance columns, emissivity-table bounds, and zero-metallicity behavior with small diagnostics.
+3. Add a spatial SPH-kernel projection, then thermal broadening and a well-defined spectral line profile.
+4. Produce surface-brightness cubes with cosmological dimming and luminosity-distance conversion.
+5. Add dust radiative transfer (for example, with SKIRT) and instrument-specific PSF, LSF, and noise models.
+6. Compare mock observables across galaxy mass, redshift, line tracer, and feedback/particle-tracking selections.
+
+The exploratory notebooks may test synthetic metallicity and toy multiphase assumptions before or alongside these additions. Keep those assumptions visibly separate from the native-abundance branch.
+
+## Brief controller sketch (reference only)
+
+This conceptual sketch shows some important function calling. Its indentation and calls are schematic, not executable code.
+
+```python
+main_controller():
+    particle_ids = simba.select_halo_particle_ids()
+    redshift = simba.get_redshift()
+
+    emissivity = config["emissivity"]  # read from .config
+
+    result = run_line_emission_pipeline()
+        gas_fields = simba.load_physical_gas_fields()
+        emission = calculate_particle_line_luminosity()
+        result = make_xxv_cube()
+```
