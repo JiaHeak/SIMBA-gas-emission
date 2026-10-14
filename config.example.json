@@ -9,7 +9,7 @@
   "emissivity": {
     "type": "ps20",
     "table_filename": "/path/to/ps20_emissivity.hdf5",
-    "line_label": "exact IdentifierLines label"
+    "line_label": "H  1      6562.81A"
   },
   "unit_factors": {
     "position_to_physical_kpc": null,
