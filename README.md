@@ -53,6 +53,15 @@ python Pipeline/scr/pipeline.py Pipeline/your_config.json
 
 The example selects a CAESAR host halo. To select only a galaxy's gas membership, set `selection.type` to `caesar_galaxy`. The supported input source is currently `simba`; the supported emissivity-table adapter is currently `ps20`.
 
+The controller selects CAESAR gas-row indices and reads those rows from the
+SIMBA snapshot. ParticleIDs are included in the gas fields but are not used
+as selection keys. The snapshot and catalogue must be confirmed to have
+matching row indexing before interpreting a result scientifically.
+
+For PS20, zero-metallicity particles use the table's primordial slice;
+positive-metallicity particles use its regular metallicity grid. Table
+interpolation raises an error when particle properties fall outside the grid.
+
 The output is a compressed `.npz` file. Load it with:
 
 ```python
@@ -78,19 +87,11 @@ Recommended additions, each with explicit validation before scientific interpret
 
 The exploratory notebooks may test synthetic metallicity and toy multiphase assumptions before or alongside these additions. Keep those assumptions visibly separate from the native-abundance branch.
 
-## Brief controller sketch (reference only)
+## Current code path
 
-This conceptual sketch shows some important function calling. Its indentation and calls are schematic, not executable code.
-
-```python
-main_controller():
-    particle_ids = simba.select_halo_particle_ids()
-    redshift = simba.get_redshift()
-
-    emissivity = config["emissivity"]  # read from .config
-
-    result = run_line_emission_pipeline()
-        gas_fields = simba.load_physical_gas_fields()
-        emission = calculate_particle_line_luminosity()
-        result = make_xxv_cube()
-```
+`scr/pipeline.py` reads the configuration, calls `simba.select_halo_gas_rows()`
+and `simba.load_physical_gas_fields()`, and saves the cube. The shared
+`scr/emissivity_tables.py` dispatches to
+`ps20.calculate_particle_line_luminosity()` in `scr/tables/ps20.py`.
+`scr/make_xxv_cube.py` bins the particle luminosities into a cube ordered
+`(velocity, image_y, image_x)`; each voxel contains summed luminosity in erg/s.
