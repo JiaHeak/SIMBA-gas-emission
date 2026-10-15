@@ -88,10 +88,14 @@ Recommended additions, each with explicit validation before scientific interpret
 The exploratory notebooks may test synthetic metallicity and toy multiphase assumptions before or alongside these additions. Keep those assumptions visibly separate from the native-abundance branch.
 
 ## Current code path
+```
+# Just schematic
 
-`scr/pipeline.py` reads the configuration, calls `simba.select_halo_gas_rows()`
-and `simba.load_physical_gas_fields()`, and saves the cube. The shared
-`scr/emissivity_tables.py` dispatches to
-`ps20.calculate_particle_line_luminosity()` in `scr/tables/ps20.py`.
-`scr/make_xxv_cube.py` bins the particle luminosities into a cube ordered
-`(velocity, image_y, image_x)`; each voxel contains summed luminosity in erg/s.
+scr/pipeline.py
+    rows = simba.select_halo_gas_rows()
+    gas_fields = simba.load_physical_gas_fields()
+
+    line_lum = emissivity_tables.py
+
+    data_cube = make_xxv_cube.py
+```
