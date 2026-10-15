@@ -1,4 +1,4 @@
-# A module to deal with Poeckinger & Sschaye (2020) emissivity tables.
+# A module to deal with Poeckinger & Sschaye (2020) emissivity tables. Retrieved from doi:10.1093/mnras/staa2172
 import h5py
 import numpy as np
 from scipy.interpolate import RegularGridInterpolator
