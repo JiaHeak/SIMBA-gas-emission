@@ -19,8 +19,8 @@ else:
     from .make_xxv_cube import make_xxv_cube
 
 
-def run_line_emission_pipeline(snapshot_filename, particle_ids, *, table_type, table_filename, line_label, redshift, unit_factors, center_kpc, x_edges_kpc, y_edges_kpc, velocity_edges_kms, los_axis='z', systemic_velocity_kms=0.0) -> dict:
-    """Read SIMBA gas, calculate line emissivity, and bin the luminosity cube.
+def run_line_emission_pipeline(snapshot_filename, gas_rows, *, table_type, table_filename, line_label, redshift, unit_factors, center_kpc, x_edges_kpc, y_edges_kpc, velocity_edges_kms, los_axis='z', systemic_velocity_kms=0.0) -> dict:
+    """Run the line-emission calculation from CAESAR snapshot rows.
 
     Returns: result (dict): luminosity cube, bin edges, and run metadata.
     """
@@ -51,9 +51,9 @@ def run_line_emission_pipeline(snapshot_filename, particle_ids, *, table_type, t
     if not np.isfinite(redshift):
         raise ValueError('redshift must be finite.')
 
-    particle_ids = np.asarray(particle_ids)
-    gas_fields = simba.load_physical_gas_fields(snapshot_filename, particle_ids, unit_factors)
-
+    gas_fields = simba.load_physical_gas_fields(
+        snapshot_filename, gas_rows, unit_factors
+    )
     for axis_index, axis in enumerate(('x', 'y', 'z')):
         gas_fields[f'{axis}_kpc'] -= center[axis_index]
 
@@ -64,21 +64,31 @@ def run_line_emission_pipeline(snapshot_filename, particle_ids, *, table_type, t
         redshift=redshift,
         line_label=line_label,
     )
-    result = make_xxv_cube(gas_fields, emission['line_luminosity_erg_s'], x_edges_kpc, y_edges_kpc, velocity_edges_kms, los_axis=los_axis, systemic_velocity_kms=systemic_velocity_kms)
+    result = make_xxv_cube(
+        gas_fields,
+        emission['line_luminosity_erg_s'],
+        x_edges_kpc,
+        y_edges_kpc,
+        velocity_edges_kms,
+        los_axis=los_axis,
+        systemic_velocity_kms=systemic_velocity_kms,
+    )
     result.update({
         'input_source': 'simba',
         'table_type': table_type,
         'line_label': line_label,
         'redshift': redshift,
-        'selected_particle_count': len(particle_ids),
+        'selected_particle_count': len(gas_rows),
         'center_kpc': center,
     })
     return result
 
 
 def main_controller():
-    """Read a JSON configuration, run the pipeline, and save its cube."""
+    """Run the active row-based pipeline from a JSON configuration.
 
+    Returns: none (NoneType): saves the luminosity cube to an NPZ file.
+    """
     parser = argparse.ArgumentParser(description='Run the line-emission cube pipeline from a JSON config.')
     parser.add_argument('config', help='Path to the pipeline JSON configuration')
     args = parser.parse_args()
@@ -106,10 +116,8 @@ def main_controller():
         raise ValueError(
             f'Unknown SIMBA CAESAR selection type: {selection_type!r}'
         )
-    catalogue_filename = resolve_path(selection['catalogue_filename'])
-    particle_ids = simba.select_halo_particle_ids(
-        snapshot_filename,
-        catalogue_filename,
+    gas_rows = simba.select_halo_gas_rows(
+        resolve_path(selection['catalogue_filename']),
         int(selection['target_galaxy_idx']),
         find_host=(selection_type == 'caesar_host_halo'),
     )
@@ -121,7 +129,7 @@ def main_controller():
     emissivity = config['emissivity']
     result = run_line_emission_pipeline(
         snapshot_filename,
-        particle_ids,
+        gas_rows,
         table_type=emissivity['type'],
         table_filename=resolve_path(emissivity['table_filename']),
         line_label=emissivity['line_label'],
@@ -145,5 +153,7 @@ def main_controller():
         f"{result['selected_particle_count']} particles to {output_path}"
     )
 
+
 if __name__ == '__main__':
+    # Active path: CAESAR row indices; ParticleIDs are not used for selection.
     main_controller()

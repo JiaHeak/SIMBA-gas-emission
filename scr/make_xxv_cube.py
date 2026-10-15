@@ -9,7 +9,7 @@ def make_xxv_cube(gas_fields: dict, particle_luminosity_erg_s, x_edges_kpc, y_ed
 
     ``gas_fields`` uses the keys from ``convert_gas_fields`` and
     ``particle_luminosity_erg_s`` can be passed from
-    ``calculate_ps20_particle_line_luminosity``. The cube is returned in array
+    ``ps20.calculate_particle_line_luminosity``. The cube is returned in array
     order ``(velocity, y, x)``. Its values are summed particle luminosities
     per voxel (erg s^-1); no smoothing or spectral broadening is applied.
 

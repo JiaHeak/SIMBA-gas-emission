@@ -14,10 +14,11 @@ SIMBA_GAS_COMPONENTS = [
     'PartType0/ElectronAbundance']
 
 
-def select_halo_particle_ids(snapshot_filename: str, catalogue_filename: str, target_galaxy_idx: int, find_host: bool = False) -> np.ndarray:
-    """Convert CAESAR gas rows to ParticleIDs in the catalogue's order.
 
-    Returns: particle_ids (numpy.ndarray): unique selected IDs in catalogue order.
+def select_halo_gas_rows(catalogue_filename: str, target_galaxy_idx: int, find_host: bool = False) -> np.ndarray:
+    """Select CAESAR gas rows without converting them to ParticleIDs.
+
+    Returns: gas_rows (numpy.ndarray): unique snapshot row indices in CAESAR order.
     """
     catalogue = load(str(catalogue_filename))
     galaxy = catalogue.galaxies[target_galaxy_idx]
@@ -28,60 +29,36 @@ def select_halo_particle_ids(snapshot_filename: str, catalogue_filename: str, ta
     assert np.unique(gas_rows).size == gas_rows.size, (
         'Repeated gas rows found in the CAESAR selection.'
     )
-
-    with h5py.File(snapshot_filename, 'r') as snapshot:
-        ids = snapshot['PartType0/ParticleIDs']
-        if gas_rows.size == 0:
-            return ids[:0]
-        sorted_order = np.argsort(gas_rows)
-        sorted_rows = gas_rows[sorted_order]
-        selected_ids = ids[sorted_rows]
-        restore_order = np.argsort(sorted_order)
-        selected_ids = selected_ids[restore_order]
-        assert np.unique(selected_ids).size == selected_ids.size, (
-            'Repeated ParticleIDs found in the CAESAR selection.'
-        )
-        return selected_ids
+    return gas_rows
 
 
-def get_gas_fields_by_id(filename, particle_ids, components=SIMBA_GAS_COMPONENTS) -> dict:
-    """Read selected gas fields, preserving ParticleID order and vector shapes.
 
-    Components use full HDF5 paths such as ``PartType0/Coordinates``.
+def get_gas_fields(filename, gas_rows, components=SIMBA_GAS_COMPONENTS) -> dict:
+    """Read snapshot gas rows, preserving CAESAR order and particle alignment.
+
     Returns: gas_fields (dict): NumPy arrays keyed by HDF5 path.
     """
-    with h5py.File(filename, "r") as snapshot:
-        snapshot_ids = snapshot["PartType0/ParticleIDs"][...]
-        requested_ids = np.asarray(particle_ids, dtype=snapshot_ids.dtype).ravel()
-        assert np.unique(snapshot_ids).size == snapshot_ids.size, (
-            'Repeated ParticleIDs found in the snapshot.'
-        )
-        assert np.unique(requested_ids).size == requested_ids.size, (
-            'Repeated IDs found in the requested ParticleID list.'
-        )
+    rows = np.asarray(gas_rows)
+    if rows.ndim != 1 or not np.issubdtype(rows.dtype, np.integer):
+        raise ValueError('gas_rows must be a one-dimensional integer array.')
+    rows = rows.astype(np.int64, copy=False)
+    assert np.unique(rows).size == rows.size, 'Repeated gas rows requested.'
 
-        if requested_ids.size:
-            sorted_rows = np.argsort(snapshot_ids)
-            sorted_ids = snapshot_ids[sorted_rows]
-            positions = np.searchsorted(sorted_ids, requested_ids)
-            found = positions < sorted_ids.size
-            found[found] &= sorted_ids[positions[found]] == requested_ids[found]
-            if not np.all(found):
-                raise KeyError(f'ParticleID not found: {requested_ids[~found][0]}')
-            selected_rows = sorted_rows[positions]
-            sorted_order = np.argsort(selected_rows)
-            rows_to_read = selected_rows[sorted_order]
-            restore_order = np.argsort(sorted_order)
-        else:
-            rows_to_read = np.empty(0, dtype=np.int64)
-            restore_order = np.empty(0, dtype=np.int64)
+    with h5py.File(filename, 'r') as snapshot:
+        gas_count = snapshot['PartType0/ParticleIDs'].shape[0]
+        if np.any(rows < 0) or np.any(rows >= gas_count):
+            raise IndexError('A requested gas row is outside the snapshot.')
 
+        sorted_order = np.argsort(rows)
+        sorted_rows = rows[sorted_order]
+        restore_order = np.argsort(sorted_order)
         requested_components = list(components)
         if 'PartType0/ParticleIDs' not in requested_components:
             requested_components.append('PartType0/ParticleIDs')
+
         return {
-            component: snapshot[component][rows_to_read][restore_order]
-            if requested_ids.size else snapshot[component][:0]
+            component: snapshot[component][sorted_rows][restore_order]
+            if rows.size else snapshot[component][:0]
             for component in requested_components
         }
 
@@ -151,13 +128,13 @@ def convert_gas_fields(                 # This is given by Codex, we should make
     }
 
 
-# Physical-field loader used by the shared pipeline after SIMBA IDs are selected.
-def load_physical_gas_fields(snapshot_filename: str, particle_ids, unit_factors: dict) -> dict:
-    """Read selected SIMBA gas and convert it to the shared field layout.
+# Physical-field loader used by the shared pipeline after gas rows are selected.
+def load_physical_gas_fields(snapshot_filename: str, gas_rows, unit_factors: dict) -> dict:
+    """Read CAESAR-selected gas rows and convert them to physical fields.
 
-    Returns: gas_fields (dict): aligned physical NumPy arrays keyed by field.
+    Returns: gas_fields (dict): aligned physical arrays, including ParticleIDs.
     """
-    raw_fields = get_gas_fields_by_id(snapshot_filename, particle_ids, SIMBA_GAS_COMPONENTS)
+    raw_fields = get_gas_fields(snapshot_filename, gas_rows, SIMBA_GAS_COMPONENTS)
     return convert_gas_fields(raw_fields, **unit_factors)
 
 
