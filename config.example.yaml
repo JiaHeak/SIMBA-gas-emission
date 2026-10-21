@@ -1,0 +1,37 @@
+# SIMBA snapshot and its matching Octavius catalogue.
+input_source: simba
+snapshot_filename: /scr/user/jiaheak/SIMBA_data/snap_m50n512_151.hdf5
+
+selection:
+  group_type: halo  # halo or galaxy; each has its own index collection
+  catalogue_filename: /scr/user/jiaheak/Octavius_results/output/octavius_snap_m50n512_151.hdf5
+  target_index: 0  # Collection index, not ParticleID or HaloID
+
+emissivity:
+  type: ps20
+  table_filename: /scr/user/jiaheak/Cloudy_tables/UVB_dust1_CR1_G1_shield0_lines.hdf5  # Replace with your table path
+  line_label: 'H  1      6562.81A'  # Exact PS20 identifier, including spaces
+
+# These values match the previous example; verify for your snapshot.
+# Use an explicit sign in scientific-notation exponents so PyYAML reads numbers.
+unit_factors:
+  position_to_physical_kpc: 1.4705882352941175
+  velocity_to_kms: 1.0
+  mass_to_g: 2.9241321628e+43
+  density_to_g_cm3: 3.1294794215e-22
+  specific_energy_to_erg_g: 1.0e+10
+  z_sun_mass_fraction: 0.0134
+
+center_kpc: auto  # Read the selected object's physical center
+map_half_width_kpc: 200
+spatial_bins: 60  # Number of bins per spatial axis
+velocity_half_width_kms: 300
+velocity_bins: 40
+# Optional explicit edges override the width/bin-count settings above:
+# x_edges_kpc: [-100, 0, 100]
+# y_edges_kpc: [-100, 0, 100]
+# velocity_edges_kms: [-300, 0, 300]
+los_axis: z
+systemic_velocity_kms: auto  # Selected object's bulk velocity along los_axis
+periodic: true
+output_filename: output_line_cube.npz  # Or auto for an informative filename
