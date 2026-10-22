@@ -1,9 +1,9 @@
-# This is a script to make position-position-velocity (XXV) cubes from the simulation data.
+# This is a script to make position-position-velocity (PPV) cubes from the simulation data.
 
 import numpy as np
 
 
-def make_xxv_cube(gas_fields: dict, particle_luminosity_erg_s, x_edges_kpc, y_edges_kpc, velocity_edges_kms, *, 
+def make_ppv_cube(gas_fields: dict, particle_luminosity_erg_s, x_edges_kpc, y_edges_kpc, velocity_edges_kms, *, 
                   los_axis: str = 'z', systemic_velocity_kms: float = 0.0) -> dict:
     """Bin particle luminosities into a simple position-position-velocity cube.
 

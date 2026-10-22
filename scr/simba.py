@@ -1,7 +1,8 @@
-# Read and convert gas data from SIMBA snapshots and CAESAR catalogues.
+# Read SIMBA gas using snapshot rows selected by catalogue membership.
+from pathlib import Path
+
 import h5py
 import numpy as np
-from caesar import load
 
 SIMBA_GAS_COMPONENTS = [
     'PartType0/ParticleIDs',
@@ -14,27 +15,89 @@ SIMBA_GAS_COMPONENTS = [
     'PartType0/ElectronAbundance']
 
 
+def select_gas_rows(catalogue_filename: str, target_index: int,
+                    group_type: str = 'halo') -> np.ndarray:
+    """Select snapshot gas rows from an Octavius halo or galaxy.
 
-def select_halo_gas_rows(catalogue_filename: str, target_galaxy_idx: int, find_host: bool = False) -> np.ndarray:
-    """Select CAESAR gas rows without converting them to ParticleIDs.
-
-    Returns: gas_rows (numpy.ndarray): unique snapshot row indices in CAESAR order.
+    Returns: gas_rows (numpy.ndarray): unique integer rows in the original snapshot.
     """
-    catalogue = load(str(catalogue_filename))
-    galaxy = catalogue.galaxies[target_galaxy_idx]
-    gas_rows = np.asarray(
-        galaxy.halo.glist if find_host else galaxy.glist,
-        dtype=np.int64,
-    )
-    assert np.unique(gas_rows).size == gas_rows.size, (
-        'Repeated gas rows found in the CAESAR selection.'
-    )
+    from octavius import load_catalogue
+
+    if group_type not in {'halo', 'galaxy'}:
+        raise ValueError('group_type must be halo or galaxy.')
+    if (
+        isinstance(target_index, (bool, np.bool_))
+        or not isinstance(target_index, (int, np.integer))
+        or target_index < 0
+    ):
+        raise ValueError('target_index must be a nonnegative integer.')
+    with load_catalogue(Path(catalogue_filename)) as catalogue:
+        groups = catalogue.haloes if group_type == 'halo' else catalogue.galaxies
+        if groups is None or target_index >= len(groups):
+            raise IndexError(f'target_index is outside the Octavius {group_type} catalogue.')
+        gas_rows = np.asarray(groups.get_particle_indices(
+            group_index=target_index, ptype='gas',
+        ))
+    if gas_rows.ndim != 1 or not np.issubdtype(gas_rows.dtype, np.integer):
+        raise ValueError('Octavius gas indices must be a one-dimensional integer array.')
+    gas_rows = gas_rows.astype(np.int64, copy=False)
+    assert np.unique(gas_rows).size == gas_rows.size, 'Repeated Octavius gas rows.'
     return gas_rows
 
 
+def get_reference_frame(catalogue_filename: str, target_index: int,
+                        group_type: str = 'halo') -> dict:
+    """Read an object's physical center and bulk velocity from Octavius.
+
+    Halo centers use minpot_pos and velocities use com_vel_total. Galaxy
+    centers and velocities use the baryonic center-of-mass quantities.
+    Catalogue unit conversions supply physical kpc and km/s directly.
+
+    Returns: reference_frame (dict): center_kpc and bulk_velocity_kms 3-vectors.
+    """
+    from octavius import load_catalogue
+
+    if group_type not in {'halo', 'galaxy'}:
+        raise ValueError('group_type must be halo or galaxy.')
+    if (
+        isinstance(target_index, (bool, np.bool_))
+        or not isinstance(target_index, (int, np.integer))
+        or target_index < 0
+    ):
+        raise ValueError('target_index must be a nonnegative integer.')
+    position_name = 'minpot_pos' if group_type == 'halo' else 'com_pos_baryon'
+    velocity_name = 'com_vel_total' if group_type == 'halo' else 'com_vel_baryon'
+    with load_catalogue(Path(catalogue_filename)) as catalogue:
+        groups = catalogue.haloes if group_type == 'halo' else catalogue.galaxies
+        if groups is None or target_index >= len(groups):
+            raise IndexError(f'target_index is outside the Octavius {group_type} catalogue.')
+        mask = np.array([target_index], dtype=np.int64)
+        center = np.asarray(groups.get_dataset(
+            position_name, mask=mask, to_units='kpc', to_physical=True,
+        ), dtype=np.float64)[0]
+        velocity = np.asarray(groups.get_dataset(
+            velocity_name, mask=mask, to_units='km/s', to_physical=True,
+        ), dtype=np.float64)[0]
+    if center.shape != (3,) or velocity.shape != (3,):
+        raise ValueError('Octavius center and bulk velocity must be 3-vectors.')
+    if not np.all(np.isfinite(center)) or not np.all(np.isfinite(velocity)):
+        raise ValueError('Octavius reference frame contains non-finite values.')
+    return {'center_kpc': center, 'bulk_velocity_kms': velocity}
+
+
+def get_catalogue_redshift(catalogue_filename: str) -> float:
+    """Read redshift from an Octavius catalogue.
+
+    Returns: redshift (float): catalogue snapshot redshift.
+    """
+    from octavius import load_catalogue
+
+    with load_catalogue(Path(catalogue_filename)) as catalogue:
+        return float(catalogue.redshift)
+
 
 def get_gas_fields(filename, gas_rows, components=SIMBA_GAS_COMPONENTS) -> dict:
-    """Read snapshot gas rows, preserving CAESAR order and particle alignment.
+    """Read snapshot gas rows, preserving requested order and particle alignment.
 
     Returns: gas_fields (dict): NumPy arrays keyed by HDF5 path.
     """
@@ -130,7 +193,7 @@ def convert_gas_fields(                 # This is given by Codex, we should make
 
 # Physical-field loader used by the shared pipeline after gas rows are selected.
 def load_physical_gas_fields(snapshot_filename: str, gas_rows, unit_factors: dict) -> dict:
-    """Read CAESAR-selected gas rows and convert them to physical fields.
+    """Read selected snapshot gas rows and convert them to physical fields.
 
     Returns: gas_fields (dict): aligned physical arrays, including ParticleIDs.
     """

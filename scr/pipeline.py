@@ -1,32 +1,38 @@
 """Main controller for the line-emission map pipeline."""
 
 import argparse
-import json
+import re
 import sys
 from pathlib import Path
 
 import numpy as np
 
 if __package__ in (None, ''):
-    # Also allow: python Pipeline/scr/pipeline.py config.json
+    # Also allow: python Pipeline/scr/pipeline.py config.yaml
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     from Pipeline.scr import simba
+    from Pipeline.scr import input
     from Pipeline.scr.emissivity_tables import calculate_particle_line_luminosity
-    from Pipeline.scr.make_xxv_cube import make_xxv_cube
+    from Pipeline.scr.ppv_cube import make_ppv_cube
 else:
     from . import simba
+    from . import input
     from .emissivity_tables import calculate_particle_line_luminosity
-    from .make_xxv_cube import make_xxv_cube
+    from .ppv_cube import make_ppv_cube
 
 
-def run_line_emission_pipeline(snapshot_filename, gas_rows, *, table_type, table_filename, line_label, redshift, unit_factors, center_kpc, x_edges_kpc, y_edges_kpc, velocity_edges_kms, los_axis='z', systemic_velocity_kms=0.0) -> dict:
-    """Run the line-emission calculation from CAESAR snapshot rows.
+def run_line_emission_pipeline(snapshot_filename, gas_rows, *, table_type, table_filename, line_label, redshift, unit_factors, center_kpc, x_edges_kpc, y_edges_kpc, velocity_edges_kms, los_axis='z', systemic_velocity_kms=0.0, box_size_kpc=None) -> dict:
+    """Run the line-emission calculation from selected snapshot rows.
 
     Returns: result (dict): luminosity cube, bin edges, and run metadata.
     """
     center = np.asarray(center_kpc, dtype=np.float64)
     if center.shape != (3,) or not np.all(np.isfinite(center)):
         raise ValueError('center_kpc must contain three finite coordinates.')
+    if box_size_kpc is not None:
+        box_size_kpc = float(box_size_kpc)
+        if not np.isfinite(box_size_kpc) or box_size_kpc <= 0:
+            raise ValueError('box_size_kpc must be positive and finite.')
 
     bin_edges = []
     for name, values in (
@@ -56,6 +62,10 @@ def run_line_emission_pipeline(snapshot_filename, gas_rows, *, table_type, table
     )
     for axis_index, axis in enumerate(('x', 'y', 'z')):
         gas_fields[f'{axis}_kpc'] -= center[axis_index]
+        if box_size_kpc is not None:
+            gas_fields[f'{axis}_kpc'] = (
+                gas_fields[f'{axis}_kpc'] + box_size_kpc / 2
+            ) % box_size_kpc - box_size_kpc / 2
 
     emission = calculate_particle_line_luminosity(
         gas_fields,
@@ -64,7 +74,7 @@ def run_line_emission_pipeline(snapshot_filename, gas_rows, *, table_type, table
         redshift=redshift,
         line_label=line_label,
     )
-    result = make_xxv_cube(
+    result = make_ppv_cube(
         gas_fields,
         emission['line_luminosity_erg_s'],
         x_edges_kpc,
@@ -80,22 +90,24 @@ def run_line_emission_pipeline(snapshot_filename, gas_rows, *, table_type, table
         'redshift': redshift,
         'selected_particle_count': len(gas_rows),
         'center_kpc': center,
+        'systemic_velocity_kms': float(systemic_velocity_kms),
     })
+    if box_size_kpc is not None:
+        result['box_size_kpc'] = box_size_kpc
     return result
 
 
 def main_controller():
-    """Run the active row-based pipeline from a JSON configuration.
+    """Run the active row-based pipeline from a YAML configuration.
 
     Returns: none (NoneType): saves the luminosity cube to an NPZ file.
     """
-    parser = argparse.ArgumentParser(description='Run the line-emission cube pipeline from a JSON config.')
-    parser.add_argument('config', help='Path to the pipeline JSON configuration')
+    parser = argparse.ArgumentParser(description='Run the line-emission cube pipeline from a YAML config.')
+    parser.add_argument('config', help='Path to the pipeline YAML configuration')
     args = parser.parse_args()
 
     config_path = Path(args.config).expanduser().resolve()
-    with config_path.open('r', encoding='utf-8') as config_file:
-        config = json.load(config_file)
+    config = input.load_config(config_path)
 
     def resolve_path(value):
         path = Path(value).expanduser()
@@ -111,22 +123,41 @@ def main_controller():
         )
 
     selection = config['selection']
-    selection_type = selection['type']
-    if selection_type not in {'caesar_host_halo', 'caesar_galaxy'}:
-        raise ValueError(
-            f'Unknown SIMBA CAESAR selection type: {selection_type!r}'
-        )
-    gas_rows = simba.select_halo_gas_rows(
-        resolve_path(selection['catalogue_filename']),
-        int(selection['target_galaxy_idx']),
-        find_host=(selection_type == 'caesar_host_halo'),
+    if 'type' in selection or not {'group_type', 'target_index'} <= selection.keys():
+        raise ValueError('selection must use group_type (halo or galaxy) and target_index.')
+    group_type = selection['group_type']
+    target_index = selection['target_index']
+    if group_type not in {'halo', 'galaxy'}:
+        raise ValueError('selection.group_type must be halo or galaxy.')
+    if not isinstance(target_index, int) or isinstance(target_index, bool) or target_index < 0:
+        raise ValueError('selection.target_index must be a non-negative integer.')
+    catalogue_filename = resolve_path(selection['catalogue_filename'])
+    reference_frame = None
+    catalogue_redshift = simba.get_catalogue_redshift(catalogue_filename)
+    snapshot_redshift = simba.get_redshift(snapshot_filename)
+    if not np.isclose(catalogue_redshift, snapshot_redshift, rtol=0, atol=1e-6):
+        raise ValueError('Catalogue and snapshot have different redshifts.')
+    gas_rows = simba.select_gas_rows(
+        catalogue_filename, target_index, group_type=group_type,
     )
+    center = config.get('center_kpc', 'auto')
+    systemic = config.get('systemic_velocity_kms', 0.0)
+    auto_center = center is None or (isinstance(center, str) and center == 'auto')
+    if auto_center or systemic is None or systemic == 'auto':
+        reference_frame = simba.get_reference_frame(
+            catalogue_filename, target_index, group_type=group_type,
+        )
 
     redshift = config.get('redshift')
     if redshift is None:
         redshift = simba.get_redshift(snapshot_filename)
 
     emissivity = config['emissivity']
+    cube_parameters = input.get_cube_parameters(config, reference_frame)
+    box_size_kpc = None
+    if config.get('periodic', False):
+        box_size_kpc = input.get_physical_box_size(snapshot_filename, config['unit_factors']['position_to_physical_kpc'])
+
     result = run_line_emission_pipeline(
         snapshot_filename,
         gas_rows,
@@ -135,15 +166,14 @@ def main_controller():
         line_label=emissivity['line_label'],
         redshift=float(redshift),
         unit_factors=config['unit_factors'],
-        center_kpc=config['center_kpc'],
-        x_edges_kpc=config['x_edges_kpc'],
-        y_edges_kpc=config['y_edges_kpc'],
-        velocity_edges_kms=config['velocity_edges_kms'],
-        los_axis=config.get('los_axis', 'z'),
-        systemic_velocity_kms=config.get('systemic_velocity_kms', 0.0),
-    )
+        box_size_kpc=box_size_kpc,
+        **cube_parameters)
 
-    output_path = Path(resolve_path(config['output_filename']))
+    output_filename = config.get('output_filename', 'auto')
+    if output_filename is None or output_filename == 'auto':
+        line_name = re.sub(r'[^A-Za-z0-9]+', '_', emissivity['line_label']).strip('_')
+        output_filename = f'line_cube_{group_type}_{target_index}_{line_name}.npz'
+    output_path = Path(resolve_path(output_filename))
     if output_path.suffix != '.npz':
         output_path = Path(f'{output_path}.npz')
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -155,5 +185,5 @@ def main_controller():
 
 
 if __name__ == '__main__':
-    # Active path: CAESAR row indices; ParticleIDs are not used for selection.
+    # Catalogue membership supplies snapshot row indices.
     main_controller()

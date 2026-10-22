@@ -1,4 +1,6 @@
 # A module to deal with Poeckinger & Sschaye (2020) emissivity tables. Retrieved from doi:10.1093/mnras/staa2172
+import warnings
+
 import h5py
 import numpy as np
 from scipy.interpolate import RegularGridInterpolator
@@ -49,12 +51,11 @@ def interpolate_log_emissivity(filename_table: str, log_nH, log_T, log_Z, redshi
     ``log_nH``, ``log_T``, and ``log_Z`` can be scalars or broadcastable
     NumPy arrays. ``line_label`` must match an entry in ``IdentifierLines``.
     The special primordial metallicity bin (the first metallicity bin, usually
-    -50) is excluded; this review version interpolates only the regular
-    metallicity grid.
+    -50) is excluded. Positive gas metallicities are clipped to the regular
+    metallicity grid; a warning reports counts below and above its limits.
+    Temperature, density, and redshift must remain within their table ranges.
 
-    Returns the table's log10 volume emissivity values. For the PS20 table
-    discussed in this project, these are log10(4 pi J_line) in
-    erg cm^-3 s^-1.
+    Returns: log_emissivity (numpy.ndarray): log10(4 pi J_line) in erg cm^-3 s^-1.
     """
     with h5py.File(filename_table, 'r') as f:
         redshift_bins = f['TableBins/RedshiftBins'][...]
@@ -77,6 +78,20 @@ def interpolate_log_emissivity(filename_table: str, log_nH, log_T, log_Z, redshi
             / (redshift_bins[upper] - redshift_bins[lower]))                                # for Linear interpolation
 
         log_nH, log_T, log_Z = np.broadcast_arrays(log_nH, log_T, log_Z)
+        if not np.all(np.isfinite(log_Z)):
+            raise ValueError('log_Z must contain only finite values before clipping.')
+        below = int(np.count_nonzero(log_Z < metallicity_bins[0]))
+        above = int(np.count_nonzero(log_Z > metallicity_bins[-1]))
+        if below or above:
+            warnings.warn(
+                f'PS20 metallicity clipping: {below} below, {above} above '
+                f'the regular log10(Z/Zsun) range '
+                f'[{metallicity_bins[0]:g}, {metallicity_bins[-1]:g}]. '
+                'Original gas metallicities are unchanged.',
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        log_Z = np.clip(log_Z, metallicity_bins[0], metallicity_bins[-1])
         points = np.column_stack((log_T.ravel(), log_Z.ravel(), log_nH.ravel()))
 
         lower_grid = emissivity[lower, :, 1:, :, line_index]
@@ -149,6 +164,9 @@ def calculate_particle_line_luminosity(gas_fields: dict, *, table_filename: str,
     ``gas_fields`` contains physical nH, temperature, metallicity relative to
     solar, and particle volume. PS20 supplies log10 volume emissivity; multiplying
     its linear value by volume gives luminosity in erg/s.
+    Exactly zero metallicity uses the primordial slice. Positive metallicity
+    is clipped at the regular grid edges for interpolation only; input gas
+    fields are not modified.
 
     Returns: emission (dict): per-particle emissivity and luminosity arrays.
     """
