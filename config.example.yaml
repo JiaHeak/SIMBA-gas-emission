@@ -23,7 +23,7 @@ unit_factors:
   z_sun_mass_fraction: 0.0134
 
 center_kpc: auto  # Read the selected object's physical center
-map_half_width_kpc: 200
+map_half_width_kpc: 100
 spatial_bins: 60  # Number of bins per spatial axis
 velocity_half_width_kms: 300
 velocity_bins: 40
