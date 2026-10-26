@@ -30,47 +30,68 @@ def get_physical_box_size(snapshot_filename: str, position_to_physical_kpc: floa
 
 
 def get_cube_parameters(config: dict, reference_frame=None) -> dict:
-    """Resolve automatic centers/velocities and generate optional uniform bins.
+    """Resolve the center and the edges needed by the chosen cube builder.
 
-    Explicit edge arrays take precedence over half-width and bin-count settings.
-    The viewing direction defaults to z and remains a user analysis choice.
+    Explicit edges override generated uniform bins. PPV uses two image axes
+    and velocity; PPP uses physical x, y, z offsets and no velocity selection.
 
-    Returns: parameters (dict): physical center, edges, LOS, and systemic velocity.
+    Returns: parameters (dict): cube type, physical center, and builder settings.
     """
-    los_axis = config.get('los_axis', 'z')
-    if los_axis not in {'x', 'y', 'z'}:
-        raise ValueError('los_axis must be x, y, or z.')
+    cube_type = config.get('cube_type', 'ppv')
+    if cube_type not in ('ppv', 'ppp'):
+        raise ValueError('cube_type must be ppv or ppp.')
     center = config.get('center_kpc', 'auto')
-    systemic = config.get('systemic_velocity_kms', 0.0)
     if center is None or (isinstance(center, str) and center == 'auto'):
         if reference_frame is None:
             raise ValueError('Automatic center requires a catalogue reference frame.')
         center = reference_frame['center_kpc']
-    if systemic is None or systemic == 'auto':
-        if reference_frame is None:
-            raise ValueError('Automatic systemic velocity requires a catalogue reference frame.')
-        systemic = reference_frame['bulk_velocity_kms'][('x', 'y', 'z').index(los_axis)]
 
     def get_edges(name, width_key, count_key, default_width):
-        if config.get(name) is not None:
-            return config[name]
-        width = float(config.get(width_key, default_width))
-        count = config.get(count_key, 2)
-        if not np.isfinite(width) or width <= 0:
-            raise ValueError(f'{width_key} must be positive and finite.')
-        if not isinstance(count, int) or isinstance(count, bool) or count < 1:
-            raise ValueError(f'{count_key} must be a positive integer.')
-        return np.linspace(-width, width, count + 1)
+        """Read explicit edges or generate uniform bins.
 
-    return {
+        Returns: edges (numpy.ndarray): finite, strictly increasing bin edges.
+        """
+        if config.get(name) is not None:
+            edges = np.asarray(config[name], dtype=np.float64)
+        else:
+            width = float(config.get(width_key, default_width))
+            count = config.get(count_key, 2)
+            if not np.isfinite(width) or width <= 0:
+                raise ValueError(f'{width_key} must be positive and finite.')
+            if not isinstance(count, int) or isinstance(count, bool) or count < 1:
+                raise ValueError(f'{count_key} must be a positive integer.')
+            edges = np.linspace(-width, width, count + 1)
+        if (edges.ndim != 1 or edges.size < 2 or not np.all(np.isfinite(edges))
+                or not np.all(np.diff(edges) > 0)):
+            raise ValueError(f'{name} must be finite, 1D, and strictly increasing.')
+        return edges
+
+    parameters = {
+        'cube_type': cube_type,
         'center_kpc': center,
-        'systemic_velocity_kms': float(systemic),
-        'los_axis': los_axis,
         'x_edges_kpc': get_edges('x_edges_kpc', 'map_half_width_kpc', 'spatial_bins', 100),
         'y_edges_kpc': get_edges('y_edges_kpc', 'map_half_width_kpc', 'spatial_bins', 100),
-        'velocity_edges_kms': get_edges(
-            'velocity_edges_kms', 'velocity_half_width_kms', 'velocity_bins', 300,
-        ),
     }
+    if cube_type == 'ppp':
+        parameters['z_edges_kpc'] = get_edges(
+            'z_edges_kpc', 'map_half_width_kpc', 'spatial_bins', 100,
+        )
+    else:
+        los_axis = config.get('los_axis', 'z')
+        if los_axis not in ('x', 'y', 'z'):
+            raise ValueError('los_axis must be x, y, or z.')
+        systemic = config.get('systemic_velocity_kms', 0.0)
+        if systemic is None or systemic == 'auto':
+            if reference_frame is None:
+                raise ValueError('Automatic systemic velocity requires a catalogue reference frame.')
+            systemic = reference_frame['bulk_velocity_kms'][('x', 'y', 'z').index(los_axis)]
+        parameters.update({
+            'los_axis': los_axis,
+            'systemic_velocity_kms': float(systemic),
+            'velocity_edges_kms': get_edges(
+                'velocity_edges_kms', 'velocity_half_width_kms', 'velocity_bins', 300,
+            ),
+        })
+    return parameters
 
 
