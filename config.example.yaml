@@ -8,9 +8,11 @@ selection:
   target_index: 0  # Collection index, not ParticleID or HaloID
 
 emissivity:
-  type: ps20
-  table_filename: /scr/user/jiaheak/Cloudy_tables/UVB_dust1_CR1_G1_shield0_lines.hdf5  # Replace with your table path
-  line_label: 'H  1      6562.81A'  # Exact PS20 identifier, including spaces
+  type: cloudy_hdf5
+  # table_filename: /scr/user/jiaheak/Cloudy_tables/UVB_dust1_CR1_G1_shield0_lines.hdf5 
+  table_filename: /scr/user/jiaheak/Cloudy_tables/simba_hot_cgm_mvp.hdf5
+  # line_label: 'H  1      6562.81A'  # Exact PS20 identifier, including spaces
+  line_label: 'O  8 18.9689A'
 
 # These values match the previous example; verify for your snapshot.
 # Use an explicit sign in scientific-notation exponents so PyYAML reads numbers.
@@ -22,14 +24,18 @@ unit_factors:
   specific_energy_to_erg_g: 1.0e+10
   z_sun_mass_fraction: 0.0134
 
+cube_type: ppv  # ppv: (velocity, y, x); ppp: (z, y, x)
 center_kpc: auto  # Read the selected object's physical center
 map_half_width_kpc: 100
 spatial_bins: 60  # Number of bins per spatial axis
+# Velocity and line-of-sight settings below apply only to PPV.
+# PPP uses map_half_width_kpc and spatial_bins for all three spatial axes.
 velocity_half_width_kms: 300
 velocity_bins: 40
 # Optional explicit edges override the width/bin-count settings above:
 # x_edges_kpc: [-100, 0, 100]
 # y_edges_kpc: [-100, 0, 100]
+# z_edges_kpc: [-100, 0, 100]  # Optional PPP depth edges
 # velocity_edges_kms: [-300, 0, 300]
 los_axis: z
 systemic_velocity_kms: auto  # Selected object's bulk velocity along los_axis
