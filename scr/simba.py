@@ -4,6 +4,8 @@ from pathlib import Path
 import h5py
 import numpy as np
 
+PROTON_MASS_G = 1.67262192369e-24
+
 SIMBA_GAS_COMPONENTS = [
     'PartType0/ParticleIDs',
     'PartType0/Coordinates',
@@ -17,22 +19,22 @@ SIMBA_GAS_COMPONENTS = [
 
 def select_gas_rows(catalogue_filename: str, target_index: int,
                     group_type: str = 'halo') -> np.ndarray:
-    """Select snapshot gas rows from an Octavius halo or galaxy.
+    """Select snapshot gas rows from an Octavius halo.
 
     Returns: gas_rows (numpy.ndarray): unique integer rows in the original snapshot.
     """
-    from octavius import load_catalogue
-
-    if group_type not in {'halo', 'galaxy'}:
-        raise ValueError('group_type must be halo or galaxy.')
+    if group_type != 'halo':
+        raise ValueError('group_type must be halo.')
     if (
         isinstance(target_index, (bool, np.bool_))
         or not isinstance(target_index, (int, np.integer))
         or target_index < 0
     ):
         raise ValueError('target_index must be a nonnegative integer.')
+    from octavius import load_catalogue
+
     with load_catalogue(Path(catalogue_filename)) as catalogue:
-        groups = catalogue.haloes if group_type == 'halo' else catalogue.galaxies
+        groups = catalogue.haloes
         if groups is None or target_index >= len(groups):
             raise IndexError(f'target_index is outside the Octavius {group_type} catalogue.')
         gas_rows = np.asarray(groups.get_particle_indices(
@@ -44,39 +46,97 @@ def select_gas_rows(catalogue_filename: str, target_index: int,
     assert np.unique(gas_rows).size == gas_rows.size, 'Repeated Octavius gas rows.'
     return gas_rows
 
+def select_cgm_gas_rows(snapshot_filename, catalogue_filename, gas_rows,
+                        target_index: int, group_type: str = 'halo', *,
+                        unit_factors: dict) -> np.ndarray:
+    """Select halo gas within r200m and nH <= 0.13 cm^-3 using shared units.
+
+    Coordinate/box and density conversions use the same unit_factors supplied
+    to load_physical_gas_fields(). Catalogue centers and radii are already
+    physical kpc. Hydrogen fraction and proton mass match convert_gas_fields().
+
+    Returns: cgm_indices (numpy.ndarray): selected snapshot rows in input order.
+    """
+    if group_type != 'halo':
+        raise ValueError('group_type must be halo.')
+    position_factor = unit_factors['position_to_physical_kpc']
+    density_factor = unit_factors['density_to_g_cm3']
+    for name, factor in (('position_to_physical_kpc', position_factor),
+                         ('density_to_g_cm3', density_factor)):
+        if not np.isfinite(factor) or factor <= 0:
+            raise ValueError(f'{name} must be positive and finite.')
+    from octavius import load_catalogue
+    import h5py
+    m_p = PROTON_MASS_G  # Same constant as convert_gas_fields(), in g
+    k_B = 1.380649e-16  # erg/K
+
+    cat = load_catalogue(catalogue_filename)
+    r200m = cat.haloes.get_dataset('r200m', to_physical=True, to_units='kpc')[target_index]
+    minpot_pos = cat.haloes.get_dataset('minpot_pos', to_physical=True, to_units='kpc')[target_index]
+    sorted_order = np.argsort(gas_rows)
+    sorted_indices = gas_rows[sorted_order]
+    restore_order = np.argsort(sorted_order)
+
+    with h5py.File(snapshot_filename, 'r') as f:
+        Coor = np.asarray(
+            f['PartType0/Coordinates'][sorted_indices][restore_order], dtype=np.float64
+        ) * position_factor
+        gas_coors = Coor[:, :3].copy()
+        box_kpc = f['Header'].attrs['BoxSize'] * position_factor
+
+        for i in range(3):
+            print('The gas min coordinates:', gas_coors[:, i].min())
+            gas_coors[:, i] -= minpot_pos[i]
+            gas_coors[:, i] -= box_kpc * np.rint(gas_coors[:, i] / box_kpc)
+
+        gas_radius = np.linalg.norm(gas_coors, axis=1)
+
+        gas_Metallicities = np.asarray(
+            f['PartType0/Metallicity'][sorted_indices][restore_order], dtype=np.float64
+        )
+        gas_Z = gas_Metallicities[:, 0] # Total metallicity
+        gas_Y = gas_Metallicities[:, 1] # Mass fraction for He
+        gas_X = 1.0 - gas_Z - gas_Y  # Same hydrogen fraction as convert_gas_fields()
+
+        rho_g_cm3 = np.asarray(
+            f['PartType0/Density'][sorted_indices][restore_order], dtype=np.float64
+        ) * density_factor
+        gas_nH = gas_X * rho_g_cm3 / m_p  # Physical hydrogen number density, cm^-3
+
+        cgm_filter = (gas_radius <= r200m) & (gas_nH <= 0.13)
+        cgm_indices = gas_rows[cgm_filter]
+
+        return cgm_indices
 
 def get_reference_frame(catalogue_filename: str, target_index: int,
                         group_type: str = 'halo') -> dict:
-    """Read an object's physical center and bulk velocity from Octavius.
+    """Read a halo's physical center and bulk velocity from Octavius.
 
-    Halo centers use minpot_pos and velocities use com_vel_total. Galaxy
-    centers and velocities use the baryonic center-of-mass quantities.
+    Halo centers use minpot_pos and velocities use com_vel_total.
     Catalogue unit conversions supply physical kpc and km/s directly.
 
     Returns: reference_frame (dict): center_kpc and bulk_velocity_kms 3-vectors.
     """
-    from octavius import load_catalogue
-
-    if group_type not in {'halo', 'galaxy'}:
-        raise ValueError('group_type must be halo or galaxy.')
+    if group_type != 'halo':
+        raise ValueError('group_type must be halo.')
     if (
         isinstance(target_index, (bool, np.bool_))
         or not isinstance(target_index, (int, np.integer))
         or target_index < 0
     ):
         raise ValueError('target_index must be a nonnegative integer.')
-    position_name = 'minpot_pos' if group_type == 'halo' else 'com_pos_baryon'
-    velocity_name = 'com_vel_total' if group_type == 'halo' else 'com_vel_baryon'
+    from octavius import load_catalogue
+
     with load_catalogue(Path(catalogue_filename)) as catalogue:
-        groups = catalogue.haloes if group_type == 'halo' else catalogue.galaxies
+        groups = catalogue.haloes
         if groups is None or target_index >= len(groups):
             raise IndexError(f'target_index is outside the Octavius {group_type} catalogue.')
         mask = np.array([target_index], dtype=np.int64)
         center = np.asarray(groups.get_dataset(
-            position_name, mask=mask, to_units='kpc', to_physical=True,
-        ), dtype=np.float64)[0]
+            'minpot_pos', mask=mask, to_units='kpc', to_physical=True,
+        ), dtype=np.float64)[0]  # One masked halo: unwrap (1, 3) to (3,).
         velocity = np.asarray(groups.get_dataset(
-            velocity_name, mask=mask, to_units='km/s', to_physical=True,
+            'com_vel_total', mask=mask, to_units='km/s', to_physical=True,
         ), dtype=np.float64)[0]
     if center.shape != (3,) or velocity.shape != (3,):
         raise ValueError('Octavius center and bulk velocity must be 3-vectors.')
@@ -128,14 +188,14 @@ def get_gas_fields(filename, gas_rows, components=SIMBA_GAS_COMPONENTS) -> dict:
 
 def convert_gas_fields(                 # This is given by Codex, we should make sure the unit convention !!!
     raw_fields: dict, *, position_to_physical_kpc: float, velocity_to_kms: float, mass_to_g: float,
-    density_to_g_cm3: float, specific_energy_to_erg_g: float, z_sun_mass_fraction: float, gamma: float = 5.0 / 3.0 ) -> dict:
+    density_to_g_cm3: float, specific_energy_to_erg_g: float, Z_sun_mass_fraction: float, gamma: float = 5.0 / 3.0 ) -> dict:
     """Convert selected SIMBA arrays to the physical fields used downstream.
 
     Conversion factors must already account for the snapshot's scale factor
     and Hubble convention. The abundance columns and electron abundance are
     interpreted according to the SIMBA snapshot convention.
     """
-    proton_mass_g = 1.67262192369e-24
+    proton_mass_g = PROTON_MASS_G
     boltzmann_erg_k = 1.380649e-16
 
     coordinates = np.asarray(
@@ -156,9 +216,9 @@ def convert_gas_fields(                 # This is given by Codex, we should make
         raw_fields['PartType0/ElectronAbundance'], dtype=np.float64
     )
 
-    z_mass_fraction = abundances[:, 0]
+    Z_mass_fraction = abundances[:, 0]
     helium_mass_fraction = abundances[:, 1]
-    hydrogen_mass_fraction = 1.0 - z_mass_fraction - helium_mass_fraction
+    hydrogen_mass_fraction = 1.0 - Z_mass_fraction - helium_mass_fraction
     helium_to_hydrogen_number = helium_mass_fraction / (4.0 * hydrogen_mass_fraction)
     mean_molecular_weight = 1.0 / (
         hydrogen_mass_fraction
@@ -185,7 +245,7 @@ def convert_gas_fields(                 # This is given by Codex, we should make
         'volume_cm3': mass_g / rho_g_cm3,
         'nH_cm3': hydrogen_mass_fraction * rho_g_cm3 / proton_mass_g,
         'T_K': temperature_k,
-        'Z_Zsun': z_mass_fraction / z_sun_mass_fraction,
+        'Z_Zsun': Z_mass_fraction / Z_sun_mass_fraction,
         'C_mass_fraction': abundances[:, 2],
         'O_mass_fraction': abundances[:, 4],
     }
