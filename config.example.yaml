@@ -40,23 +40,11 @@ emissivity:
   # table_filename: /scr/user/jiaheak/Cloudy_tables/UVB_dust1_CR1_G1_shield0_lines.hdf5
   # line_labels: ['H  1      6562.81A']
 
-cube:
-  type: ppp  # v2 array order: ppv (x,y,velocity); ppp (x,y,z)
-  center_kpc: auto  # Selected halo's physical minpot_pos
-  periodic: true  # Wrap cube offsets across the simulation box
-  map_half_width_kpc: 1600
-  spatial_bins: 100  # Per spatial axis; PPP uses these for z as well
-  # PPV only (ignored for PPP):
-  velocity_half_width_kms: 300
-  velocity_bins: 80
-  los_axis: z
-  systemic_velocity_kms: auto  # Halo bulk velocity component along los_axis
-  # Optional explicit edges override width/bin-count settings:
-  # x_edges_kpc: [-100, 0, 100]
-  # y_edges_kpc: [-100, 0, 100]
-  # z_edges_kpc: [-100, 0, 100]  # PPP only
-  # velocity_edges_kms: [-300, 0, 300]  # PPV only
+reference_frame:
+  center_kpc: auto  # Default for Reader; stored coordinates remain in the box frame.
+  bulk_velocity_kms: auto  # Three components; Reader can choose any LOS later.
+  periodic: true
 
 output:
-  filename: output_line_cubes_v2.hdf5  # All requested lines; or auto
+  filename: particle_emission.hdf5
   # Existing outputs are not overwritten; choose a new filename for each run.

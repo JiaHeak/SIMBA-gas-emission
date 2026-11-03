@@ -165,9 +165,9 @@ def select_cgm_gas_rows(snapshot_filename, catalogue_filename, gas_rows,
     m_p = PROTON_MASS_G  # Same constant as convert_gas_fields(), in g
     k_B = 1.380649e-16  # erg/K
 
-    cat = load_catalogue(catalogue_filename)
-    r200m = cat.haloes.get_dataset('r200m', to_physical=True, to_units='kpc')[target_index]
-    minpot_pos = cat.haloes.get_dataset('minpot_pos', to_physical=True, to_units='kpc')[target_index]
+    with load_catalogue(catalogue_filename) as cat:
+        r200m = cat.haloes.get_dataset('r200m', to_physical=True, to_units='kpc')[target_index]
+        minpot_pos = cat.haloes.get_dataset('minpot_pos', to_physical=True, to_units='kpc')[target_index]
     sorted_order = np.argsort(gas_rows)
     sorted_indices = gas_rows[sorted_order]
     restore_order = np.argsort(sorted_order)
@@ -180,7 +180,6 @@ def select_cgm_gas_rows(snapshot_filename, catalogue_filename, gas_rows,
         box_kpc = f['Header'].attrs['BoxSize'] * position_factor
 
         for i in range(3):
-            print('The gas min coordinates:', gas_coors[:, i].min())
             gas_coors[:, i] -= minpot_pos[i]
             gas_coors[:, i] -= box_kpc * np.rint(gas_coors[:, i] / box_kpc)
 
@@ -379,3 +378,20 @@ def get_redshift(snapshot_filename: str) -> float:
     """
     with h5py.File(snapshot_filename, 'r') as snapshot:
         return float(snapshot['Header'].attrs['Redshift'])
+
+
+def load_catalogue_gas_fields(snapshot_filename, gas_rows, unit_factors):
+    """Load physical gas plus the original rows and physical kernel support radii.
+
+    Returns: gas (dict): aligned particle fields in the simulation-box frame.
+    """
+    components = [*SIMBA_GAS_COMPONENTS, 'PartType0/SmoothingLength']
+    raw = get_gas_fields(snapshot_filename, gas_rows, components)
+    conversion = {name: value for name, value in unit_factors.items()
+                  if name not in ('kpc_to_cm', 'scale_factor', 'hubble_param',
+                                  'cosmological_factors', 'unit_conversions')}
+    gas = convert_gas_fields(raw, **conversion)
+    gas['snapshot_row'] = np.asarray(gas_rows, dtype=np.int64)
+    gas['smoothing_length_kpc'] = (np.asarray(raw['PartType0/SmoothingLength'], dtype=float)
+                                   * unit_factors['position_to_physical_kpc'])
+    return gas
