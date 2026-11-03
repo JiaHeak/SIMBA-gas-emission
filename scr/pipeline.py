@@ -83,6 +83,12 @@ def run_line_emission_pipeline(
                 gas_fields[f'{axis}_kpc'] + box_size_kpc / 2
             ) % box_size_kpc - box_size_kpc / 2
 
+    # Prepared runs supply the user's shared constant. Standalone cube calls
+    # can retain the builder's standard kpc conversion.
+    spatial_units = {}
+    if 'kpc_to_cm' in unit_factors:
+        spatial_units['kpc_to_cm'] = unit_factors['kpc_to_cm']
+
     for emission in iter_particle_line_luminosities(
         gas_fields, emissivity_table=emissivity_table, redshift=redshift,
     ):
@@ -97,6 +103,7 @@ def run_line_emission_pipeline(
             result = make_ppp_cube(
                 gas_fields, emission['line_luminosity_erg_s'],
                 x_edges_kpc, y_edges_kpc, third_edges,
+                **spatial_units,
             )
         result.update({
             'input_source': 'simba',
@@ -109,7 +116,15 @@ def run_line_emission_pipeline(
             'selected_particle_count': len(gas_rows),
             'center_kpc': center,
         })
-        for name in ('abundance_model', 'clipped_particle_count'):
+        # Pass table definitions through unchanged; the controller does not
+        # interpret Cloudy physics or know which physical axes it supports.
+        for name in ('schema', 'axis_metadata', 'physics'):
+            if name in emissivity_table['data']:
+                result['table_' + name] = emissivity_table['data'][name]
+        for name in ('abundance_model', 'clipped_particle_count', 'clipping_counts',
+                     'zero_metallicity_particle_count', 'metallicity_clipped_particle_count',
+                     'zero_emissivity_particle_count', 'interpolation_method',
+                     'metallicity_mapping', 'metallicity_clipping_caveat'):
             if name in emission:
                 result[name] = emission[name]
         if box_size_kpc is not None:
@@ -120,12 +135,14 @@ def run_line_emission_pipeline(
 def prepare_run(parameters: dict) -> dict:
     """Resolve simulation-derived settings without loading particle fields.
 
+    Stores resolved physical_unit_factors in parameters for output provenance;
+    parameters['unit_factors'] retains the original YAML constants.
+
     Returns: run (dict): arguments for halo selection, CGM selection, and
-        the existing line-emission calculation.
+        line emission, sharing one resolved physical-unit dictionary.
     """
     source = parameters['source']
     selection = parameters['selection']
-    units = parameters['unit_factors']
     cube = parameters['cube']
     emissivity = parameters['emissivity']
     emissivity_table = load_emissivity_table(
@@ -138,6 +155,8 @@ def prepare_run(parameters: dict) -> dict:
     catalogue_redshift = simba.get_catalogue_redshift(catalogue_filename)
     if not np.isclose(catalogue_redshift, snapshot_redshift, rtol=0, atol=1e-6):
         raise ValueError('Catalogue and snapshot have different redshifts.')
+    units = simba.compute_unit_factors(snapshot_filename, parameters['unit_factors'])
+    parameters['physical_unit_factors'] = units
 
     reference_frame = None
     center = cube['center_kpc']

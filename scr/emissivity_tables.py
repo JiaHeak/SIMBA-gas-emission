@@ -81,3 +81,4 @@ def iter_particle_line_luminosities(gas_fields: dict, *, emissivity_table: dict,
             yield {'line_label': label, **emission}
     else:
         raise ValueError('Unsupported prepared emissivity table.')
+

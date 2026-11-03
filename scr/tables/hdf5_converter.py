@@ -6,7 +6,8 @@ commands can be described with axis_definitions (or --axis-definitions JSON).
 
 Storage order is T, nH, metal scale, then other axes sorted by name, with lines
 last. Original command order and raw model rows remain in provenance. This new
-schema is intentionally separate from the existing two-axis runtime adapter.
+schema is distinct from datacubes and legacy tables. The runtime adapter accepts
+its two-axis T/nH tables; additional physical axes need gas-coordinate mappings.
 Requires NumPy and h5py; does not run Cloudy or interpolate/modify emissivities.
 
 Example (use the real output paths from the same completed run)::
@@ -264,8 +265,50 @@ def _read_text_table(filename):
     return header, records
 
 
+def _match_grid_coordinates(axis, coordinates):         # ??? This is suspected to be a lengthy use. Can we try bypass it by altering the part "start + index*step" ???
+    """Match nominal or C25 float32 range arithmetic plus six-decimal printing.
+
+    C25 evaluates start + index*step in realnum (normally float32). For example,
+    2.2 + 31*0.2 can print as 8.400001. Keep nominal requested storage axes and
+    raw output coordinates separately; do not relax all matches to a large
+    generic tolerance. Fine grids with overlapping matching bounds are rejected.
+
+    Returns: match (tuple[numpy.ndarray, dict]): unique bin indices and a report
+        of offsets/float32 matches, without modifying raw coordinates.
+    """
+    values = axis['values']
+    start, _, step = _numbers(axis['grid_command'])[:3]
+    with np.errstate(over='raise', invalid='raise'):
+        cloudy_values = np.sort(np.float32(start) + np.arange(len(values), dtype=np.float32)
+                                * np.float32(step)).astype(float)
+    print_tolerance = 5.1e-7
+    radius = np.max(np.abs(cloudy_values - values)) + print_tolerance
+    if len(values) > 1 and np.min(np.diff(values)) <= 2 * radius:
+        raise ValueError(f'{axis["name"]} grid is too fine for unambiguous Cloudy coordinate matching.')
+    right = np.minimum(np.searchsorted(values, coordinates), len(values) - 1)
+    left = np.maximum(right - 1, 0)
+    positions = np.where(abs(coordinates - values[left]) <= abs(coordinates - values[right]), left, right)
+    offsets = np.abs(coordinates - values[positions])
+    nominal_match = offsets <= print_tolerance
+    float32_match = np.abs(coordinates - cloudy_values[positions]) <= print_tolerance
+    if not np.all(nominal_match | float32_match):
+        row = int(np.flatnonzero(~(nominal_match | float32_match))[0])
+        raise ValueError(f'Output coordinates disagree with the requested {axis["name"]} grid: '
+                         f'row {row}, observed {coordinates[row]:.9g}, requested {values[positions[row]]:.9g}.')
+    count = int(np.count_nonzero(~nominal_match))
+    report = {'axis': axis['name'], 'max_absolute_offset': float(offsets.max()),
+              'float32_only_row_count': count, 'print_tolerance': print_tolerance}
+    if count:
+        warnings.warn(f'{axis["name"]}: {count} coordinates matched C25 float32 range arithmetic; '
+                      f'maximum nominal-grid offset {offsets.max():.3g}. Raw coordinates are preserved.',
+                      RuntimeWarning, stacklevel=2)
+    return positions, report
+
+
 def read_cloudy_outputs(model, grid_filename, emis_filename, *, model_order='sequential'):
     """Validate one-zone outputs and assemble their complete named N-axis tensor.
+
+    model comes from .in Cloudy input.
 
     cloudy-c25-index explicitly affirms verified C25 merging by model index in
     both raw files. The .emis format has no model IDs: correspondence cannot be
@@ -305,18 +348,12 @@ def read_cloudy_outputs(model, grid_filename, emis_filename, *, model_order='seq
     shape = tuple(len(axis['values']) for axis in stored_axes)
     if len(rows) != math.prod(shape):
         raise ValueError(f'Incomplete grid: expected {math.prod(shape)} models, found {len(rows)}.')
-    storage_indices = []
+    storage_indices, coordinate_match_reports = [], []
     for axis in stored_axes:
         column = next(i for i, item in enumerate(input_axes) if item['name'] == axis['name'])
-        values = axis['values']
-        # Match the six-decimal Cloudy coordinates without changing physical values.
-        right = np.minimum(np.searchsorted(values, coordinates[:, column]), len(values) - 1)
-        left = np.maximum(right - 1, 0)
-        positions = np.where(abs(coordinates[:, column] - values[left])
-                             <= abs(coordinates[:, column] - values[right]), left, right)
-        if not np.allclose(coordinates[:, column], values[positions], rtol=0, atol=5.1e-7):
-            raise ValueError(f'Output coordinates disagree with the requested {axis["name"]} grid.')
+        positions, report = _match_grid_coordinates(axis, coordinates[:, column])
         storage_indices.append(positions)
+        coordinate_match_reports.append(report)
     flat_indices = np.ravel_multi_index(tuple(storage_indices), shape)
     if np.unique(flat_indices).size != len(rows):
         raise ValueError('Duplicate coordinate combinations; the Cartesian grid is incomplete.')
@@ -338,7 +375,8 @@ def read_cloudy_outputs(model, grid_filename, emis_filename, *, model_order='seq
     return {'axes': stored_axes, 'labels': labels, 'emissivity': emissivity,
             'coordinates': coordinates, 'storage_indices': np.column_stack(storage_indices),
             'model_index': indices, 'rank': ranks, 'sequence': sequence,
-            'warning_flag': warning_flags, 'depth_cm': raw_values[:, 0]}
+            'warning_flag': warning_flags, 'depth_cm': raw_values[:, 0],
+            'coordinate_match_reports': coordinate_match_reports}
 
 
 def convert_to_hdf5(input_filename, grid_filename, emis_filename, output_filename, *,
@@ -382,12 +420,20 @@ def convert_to_hdf5(input_filename, grid_filename, emis_filename, output_filenam
         warnings.warn(f'Preserving {zero_count} zero emissivities; direct log interpolation is unsupported.', RuntimeWarning)
     input_order = [axis['name'] for axis in model['axes']]
     stored_order = [axis['name'] for axis in table['axes']]
+    composition_commands = [record['command'] for record in model['physics']
+                            if record['kind'] in ('abundances', 'metal_scale')]
+    abundance_model = (
+        'Explicit composition commands: ' + '; '.join(composition_commands)
+        if composition_commands else
+        'No explicit abundances/metals command identified; reference composition is unconfirmed.'
+    ) + ' See the original input for other composition settings and Cloudy defaults.'
     summary = (f'{model["title"]}\nSchema: {SCHEMA}\nCloudy version: {version}\n'
                f'Input axes: {", ".join(input_order)}\nStored axes: {", ".join(stored_order)}, line\n'
                f'Shape: {table["emissivity"].shape}; models: {len(table["model_index"])}\n'
                f'Warning models: {table["warning_flag"].sum()}; zero emissivities: {zero_count}\n'
                'Physics metadata extracts explicit commands only; user notes are unverified annotations.\n'
-               'This schema requires its own runtime reader; do not relabel as the legacy MVP schema.')
+               'Pipeline interpolation currently supports two-axis T/nH tables only; '
+               'additional axes and zero emissivities need an explicit runtime treatment.')
     output_path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(prefix='.cloudy_conversion_', suffix='.hdf5', dir=output_path.parent)
     os.close(descriptor)
@@ -400,7 +446,8 @@ def convert_to_hdf5(input_filename, grid_filename, emis_filename, output_filenam
                 cloudy_version_source='cloudy_output' if versions else ('user_argument' if cloudy_version else 'unconfirmed'),
                 axis_order=', '.join(stored_order + ['line']), model_order=model_order,
                 model_count=len(table['model_index']), line_count=len(table['labels']),
-                zero_emissivity_count=zero_count, log_interpolation_ready=(zero_count == 0))
+                zero_emissivity_count=zero_count, log_interpolation_ready=(zero_count == 0),
+                abundance_model=abundance_model)
             axes = destination.create_group('axes')
             lines = destination.create_group('lines')
             label_data = lines.create_dataset('labels', data=table['labels'], dtype=string_type)
@@ -443,8 +490,14 @@ def convert_to_hdf5(input_filename, grid_filename, emis_filename, output_filenam
             provenance.create_dataset('user_notes', data=model['user_notes'], dtype=string_type)
             provenance.create_dataset('user_notes_input_lines', data=model['note_lines'], dtype='i8')
             provenance.create_dataset('axis_definitions_json', data=json.dumps(axis_definitions or {}, indent=2), dtype=string_type)
+            provenance.create_dataset('coordinate_match_reports_json',
+                                      data=json.dumps(table['coordinate_match_reports'], indent=2), dtype=string_type)
             provenance.attrs.update(grid_save_command=model['grid_save'], emissivity_save_command=model['emis_save'],
-                line_match_note=line_match_note, numerical_changes='none: no floor, clipping, rescaling, or normalization',
+                line_match_note=line_match_note,
+                numerical_changes='Emissivities unchanged: no floor, clipping, rescaling, or normalization. '
+                                  'Storage axes use requested coordinates; raw model coordinates are preserved.',
+                coordinate_match_policy='Requested or C25 float32(start + index*step), plus 5.1e-7 '
+                                        'printing tolerance. Ambiguous bins and genuine mismatches are rejected.',
                 alignment_evidence=('Explicit opt-in to C25 model-index merging in both files; .emis contains no IDs.'
                                     if model_order == 'cloudy-c25-index' else 'Sequential rank 0, sequence equals model index; paired raw files required.'))
             sources = provenance.create_group('sources')

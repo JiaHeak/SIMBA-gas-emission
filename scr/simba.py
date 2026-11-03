@@ -16,6 +16,101 @@ SIMBA_GAS_COMPONENTS = [
     'PartType0/Metallicity',
     'PartType0/ElectronAbundance']
 
+def compute_conversion_factors(snapshot_filename: str, unit_inputs: dict, *,
+                                to_physical: bool = True, to_units: bool = True) -> dict:
+    """Keep cosmological corrections and unit-scale conversions independent.
+
+    Raw coordinates are comoving kpc/h, masses are 1e10 Msun/h, density is
+    mass per comoving code volume, and raw velocities need sqrt(a).
+    to_physical selects only corrections involving a and h. to_units selects
+    ordinary unit-scale conversion, retaining the comoving/h convention when
+    to_physical=False. Either or both stages can be used.
+    With to_units=False, mass remains in 1e10 Msun (and retains /h unless
+    to_physical=True). Field names in factors are deliberately unit-neutral.
+    Gamma and solar metallicity are gas-model parameters, not conversions.
+
+    Returns: stages (dict): cosmological_factors, unit_conversions, selected
+        factors by quantity, a/h metadata, and the two applied switches.
+    """
+    if not isinstance(to_physical, bool) or not isinstance(to_units, bool):
+        raise ValueError('to_physical and to_units must be booleans.')
+    required = {'solar_mass_g', 'kpc_to_cm', 'specific_energy_to_erg_g', 'z_sun_mass_fraction'}
+    missing = required - unit_inputs.keys()
+    unknown = unit_inputs.keys() - (required | {'gamma'})
+    if missing or unknown:
+        raise ValueError(f'Unit inputs: missing {sorted(missing)}; unknown {sorted(unknown)}.')
+    constants = {**unit_inputs, 'gamma': unit_inputs.get('gamma', 5.0 / 3.0)}
+    for name, value in constants.items():
+        if isinstance(value, (bool, np.bool_)) or not np.isfinite(value) or value <= 0:
+            raise ValueError(f'{name} must be positive and finite.')
+    if constants['gamma'] <= 1 or constants['z_sun_mass_fraction'] >= 1:
+        raise ValueError('gamma must exceed one and z_sun_mass_fraction must be below one.')
+    with h5py.File(snapshot_filename, 'r') as snapshot:
+        a = float(snapshot['Header'].attrs['Time'])
+        h = float(snapshot['Header'].attrs['HubbleParam'])
+    if not np.isfinite(a) or a <= 0 or not np.isfinite(h) or h <= 0:
+        raise ValueError('Snapshot scale factor a and Hubble parameter h must be positive and finite.')
+
+    # Stage 1: dimensionless cosmological corrections; no unit-scale change.
+    cosmological_factors = {
+        'position': a / h,
+        'mass': 1.0 / h,
+        'density': h**2 / a**3,
+        'velocity': float(np.sqrt(a)),
+        'specific_energy': 1.0,
+    }
+    # Stage 2: ordinary unit conversions; no dependence on a or h.
+    code_mass_g = 1.0e10 * constants['solar_mass_g']
+    unit_conversions = {
+        'position': 1.0,  # SIMBA's base length is already one kpc.
+        'mass': code_mass_g,
+        'density': code_mass_g / constants['kpc_to_cm']**3,
+        'velocity': 1.0,  # SIMBA's base velocity is already one km/s.
+        'specific_energy': float(constants['specific_energy_to_erg_g']),
+    }
+    factors = {
+        quantity: (cosmological_factors[quantity] if to_physical else 1.0)
+                  * (unit_conversions[quantity] if to_units else 1.0)
+        for quantity in unit_conversions
+    }
+    return {
+        'cosmological_factors': cosmological_factors,
+        'unit_conversions': unit_conversions,
+        'factors': factors,
+        'scale_factor': a,
+        'hubble_param': h,
+        'to_physical': to_physical,
+        'to_units': to_units,
+    }
+
+
+def compute_unit_factors(snapshot_filename: str, unit_inputs: dict) -> dict:
+    """Select both conversion stages for the emission pipeline's physical fields.
+
+    The combined entries keep the existing downstream interface. Both stage
+    dictionaries remain available for inspection and output provenance.
+    For partial conversions, use compute_conversion_factors() instead: a
+    partially converted mass must not be labelled as grams by the pipeline.
+
+    Returns: unit_factors (dict): combined physical factors, gas-model inputs,
+        geometry/cosmology metadata, and both separate conversion stages.
+    """
+    stages = compute_conversion_factors(snapshot_filename, unit_inputs)
+    factors = stages['factors']
+    return {
+        'position_to_physical_kpc': factors['position'],
+        'mass_to_g': factors['mass'],
+        'density_to_g_cm3': factors['density'],
+        'velocity_to_kms': factors['velocity'],
+        'specific_energy_to_erg_g': factors['specific_energy'],
+        'z_sun_mass_fraction': float(unit_inputs['z_sun_mass_fraction']),
+        'gamma': float(unit_inputs.get('gamma', 5.0 / 3.0)),
+        'kpc_to_cm': float(unit_inputs['kpc_to_cm']),
+        'scale_factor': stages['scale_factor'],
+        'hubble_param': stages['hubble_param'],
+        'cosmological_factors': stages['cosmological_factors'],
+        'unit_conversions': stages['unit_conversions'],
+    }
 
 def select_gas_rows(catalogue_filename: str, target_index: int,
                     group_type: str = 'halo') -> np.ndarray:
@@ -188,12 +283,15 @@ def get_gas_fields(filename, gas_rows, components=SIMBA_GAS_COMPONENTS) -> dict:
 
 def convert_gas_fields(                 # This is given by Codex, we should make sure the unit convention !!!
     raw_fields: dict, *, position_to_physical_kpc: float, velocity_to_kms: float, mass_to_g: float,
-    density_to_g_cm3: float, specific_energy_to_erg_g: float, Z_sun_mass_fraction: float, gamma: float = 5.0 / 3.0 ) -> dict:
+    density_to_g_cm3: float, specific_energy_to_erg_g: float, z_sun_mass_fraction: float, gamma: float = 5.0 / 3.0 ) -> dict:
     """Convert selected SIMBA arrays to the physical fields used downstream.
 
     Conversion factors must already account for the snapshot's scale factor
     and Hubble convention. The abundance columns and electron abundance are
     interpreted according to the SIMBA snapshot convention.
+
+    Returns: gas_fields (dict): aligned physical positions, velocities, mass,
+        density, volume, temperature, hydrogen density, and abundance arrays.
     """
     proton_mass_g = PROTON_MASS_G
     boltzmann_erg_k = 1.380649e-16
@@ -219,6 +317,10 @@ def convert_gas_fields(                 # This is given by Codex, we should make
     Z_mass_fraction = abundances[:, 0]
     helium_mass_fraction = abundances[:, 1]
     hydrogen_mass_fraction = 1.0 - Z_mass_fraction - helium_mass_fraction
+    if (not np.all(np.isfinite(abundances[:, :2]))
+            or np.any(Z_mass_fraction < 0) or np.any(helium_mass_fraction < 0)
+            or np.any(hydrogen_mass_fraction <= 0)):
+        raise ValueError('SIMBA Z/Y mass fractions must be finite/nonnegative with X=1-Z-Y > 0.')
     helium_to_hydrogen_number = helium_mass_fraction / (4.0 * hydrogen_mass_fraction)
     mean_molecular_weight = 1.0 / (
         hydrogen_mass_fraction
@@ -245,7 +347,11 @@ def convert_gas_fields(                 # This is given by Codex, we should make
         'volume_cm3': mass_g / rho_g_cm3,
         'nH_cm3': hydrogen_mass_fraction * rho_g_cm3 / proton_mass_g,
         'T_K': temperature_k,
-        'Z_Zsun': Z_mass_fraction / Z_sun_mass_fraction,
+        'Z_Zsun': Z_mass_fraction / z_sun_mass_fraction,
+        # Preserve the actual particle fractions for Cloudy's metal/H mapping.
+        # No solar normalization, clipping or primordial substitution here.
+        'Z_mass_fraction': Z_mass_fraction,
+        'X_mass_fraction': hydrogen_mass_fraction,
         'C_mass_fraction': abundances[:, 2],
         'O_mass_fraction': abundances[:, 4],
     }
@@ -258,7 +364,12 @@ def load_physical_gas_fields(snapshot_filename: str, gas_rows, unit_factors: dic
     Returns: gas_fields (dict): aligned physical arrays, including ParticleIDs.
     """
     raw_fields = get_gas_fields(snapshot_filename, gas_rows, SIMBA_GAS_COMPONENTS)
-    return convert_gas_fields(raw_fields, **unit_factors)
+    # Only the combined factors enter field conversion; never apply either
+    # component again. Other entries describe geometry or provenance.
+    gas_units = {name: value for name, value in unit_factors.items()
+                 if name not in ('kpc_to_cm', 'scale_factor', 'hubble_param',
+                                 'cosmological_factors', 'unit_conversions')}
+    return convert_gas_fields(raw_fields, **gas_units)
 
 
 def get_redshift(snapshot_filename: str) -> float:

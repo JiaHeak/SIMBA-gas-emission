@@ -22,8 +22,9 @@ def load_config(config_filename) -> dict:
 def read_parameters(config_filename) -> dict:
     """Read grouped YAML parameters, apply defaults, and resolve file paths.
 
-    No simulation data are read here. Catalogue-derived values remain 'auto'
-    until the controller prepares the run. Relative paths use the YAML folder,
+    No simulation data are read here. unit_factors contains global constants;
+    simba.compute_unit_factors() resolves the snapshot-dependent factors later.
+    Catalogue-derived values remain 'auto' until run preparation. Paths use the YAML folder,
     not the shell's working directory. Unknown keys raise rather than disappear.
 
     Returns: parameters (dict): source, selection, unit_factors, emissivity, cube,
@@ -56,8 +57,7 @@ def read_parameters(config_filename) -> dict:
                      {'type': 'simba', 'redshift': 'auto'})
     selection = section('selection', {'group_type', 'target_index'})
     units = section('unit_factors', {
-        'position_to_physical_kpc', 'velocity_to_kms', 'mass_to_g',
-        'density_to_g_cm3', 'specific_energy_to_erg_g', 'z_sun_mass_fraction',
+        'solar_mass_g', 'kpc_to_cm', 'specific_energy_to_erg_g', 'z_sun_mass_fraction',
     }, {'gamma': 5.0 / 3.0})
     emissivity = section('emissivity', {'type', 'table_filename', 'line_labels'})
     cube = section('cube', set(), {
@@ -94,6 +94,8 @@ def read_parameters(config_filename) -> dict:
         units[name] = number(value, f'unit_factors.{name}', positive=True)
     if units['gamma'] <= 1:
         raise ValueError('unit_factors.gamma must be greater than one.')
+    if units['z_sun_mass_fraction'] >= 1:
+        raise ValueError('unit_factors.z_sun_mass_fraction must be below one.')
     if emissivity['type'] not in ('ps20', 'cloudy_hdf5'):
         raise ValueError('emissivity.type must be ps20 or cloudy_hdf5 (HDF5 tables only).')
     labels = emissivity['line_labels']

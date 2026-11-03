@@ -1,0 +1,52 @@
+# Gravity snapshot 120; exact line labels from the completed Cloudy table.
+# Linear epsilon interpolation on log T/nH/metal-scale coordinates preserves zeros.
+# CAVEAT: Z=0 and out-of-range particle metal scales are clipped to finite table
+# boundaries. Z=0 therefore uses an ENRICHED model, not primordial physics.
+# Counts/warnings and cube provenance record this approximation; original Z/X
+# and table emissivities remain unchanged. PBS still validates table compatibility.
+source:
+  type: simba
+  snapshot_filename: /home/jiaheak/Sims/SIMBA/snap_m50n512_120.hdf5
+  catalogue_filename: /home/jiaheak/Octavius/output/simba_m50n512_120/octavius_snap_m50n512_120.hdf5
+  redshift: auto  # Header: 0.6026129035521897; Cloudy radiation: 0.602613.
+
+selection:
+  group_type: halo
+  target_index: 0  # Editable: Octavius halo collection index, not HaloID.
+
+unit_factors:
+  # Same global constants as the current template; a/h comes from the snapshot.
+  solar_mass_g: 1.988416e+33
+  kpc_to_cm: 3.0856775814913673e+21
+  specific_energy_to_erg_g: 1.0e+10
+  z_sun_mass_fraction: 0.0134  # Not a substitute for Cloudy's metal/H reference mapping.
+
+emissivity:
+  type: cloudy_hdf5
+  table_filename: /home/jiaheak/Cloudy/run1/HDF5_table/simba_cgm_T_nH_metals_hm12_z0p602.hdf5
+  # Preserve the actual .emis/HDF5 identifiers, including internal spacing.
+  # These requested identifiers do not prove exact/unique atomic-line resolution.
+  line_labels:
+    - 'O  7 21.6000A'
+    - 'O  7 22.1000A'
+    - 'O  8 18.9689A'
+    - 'O  6 1031.91A'
+    - 'O  6 1037.62A'
+    - 'C  4 1548.19A'
+    - 'C  4 1550.78A'
+    - 'He 2 1640.43A'
+    - 'H  1 1215.67A'
+    - 'H  1 6562.81A'
+    - 'H  1 4861.33A'
+    - 'O  3 5006.84A'
+
+cube:
+  # Retain the template's PPP geometry; edit these if a different aperture is needed.
+  type: ppp
+  center_kpc: auto
+  periodic: true
+  map_half_width_kpc: 1600
+  spatial_bins: 100
+
+output:
+  filename: /home/jiaheak/SIMBA_CGM_pipeline/Pipeline/datacube_nT_Hden_metals.hdf5

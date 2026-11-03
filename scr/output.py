@@ -7,6 +7,7 @@ Labels are attributes rather than HDF5 paths, so spaces or slashes are safe.
 """
 
 from datetime import datetime, timezone
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -30,7 +31,11 @@ def _write_shared(destination, result: dict, parameters: dict) -> None:
                  'image_y_axis', 'los_axis', 'systemic_velocity_kms'):
         if name in result:
             destination.attrs[name] = result[name]
-    destination.attrs['deposition'] = 'point deposition; no smoothing or line broadening'
+    destination.attrs['deposition'] = result.get('deposition', 'point deposition; no smoothing or line broadening')
+    for name in ('smoothing_enabled', 'smoothing_kernel_1d', 'smoothing_sigma_voxels',
+                 'smoothing_boundary', 'smoothing_caveat'):
+        if name in result:
+            destination.attrs[name] = result[name]
     axes = destination.create_group('axes')
     for name, values in result.items():
         if name.endswith('_edges_kpc') or name == 'velocity_edges_kms':
@@ -60,14 +65,53 @@ def _write_shared(destination, result: dict, parameters: dict) -> None:
     provenance.create_dataset('parameters_yaml', data=yaml.safe_dump(parameters, sort_keys=False),
                               dtype=h5py.string_dtype('utf-8'))
     units = provenance.create_group('unit_factors')
-    for name, value in parameters['unit_factors'].items():
-        units.attrs[name] = value
+    # Standalone writer calls may already supply final factors. YAML constants
+    # must be resolved by prepare_run() before they can describe a physical run.
+    resolved_units = parameters.get('physical_unit_factors', parameters['unit_factors'])
+    if 'solar_mass_g' in resolved_units:
+        raise ValueError('Resolve YAML unit constants with prepare_run() before saving a datacube.')
+    for name, value in resolved_units.items():
+        if name in ('cosmological_factors', 'unit_conversions'):
+            stage = provenance.create_group(name)
+            for quantity, factor in value.items():
+                stage.attrs[quantity] = factor
+            stage.attrs['description'] = (
+                'Dimensionless corrections from a and h only.' if name == 'cosmological_factors'
+                else 'Unit-scale conversions only; independent of a and h.')
+        else:
+            units.attrs[name] = value
+    if 'physical_unit_factors' in parameters:
+        inputs = provenance.create_group('unit_inputs')
+        for name, value in parameters['unit_factors'].items():
+            inputs.attrs[name] = value
     table_axes = provenance.create_group('table_axes')
     axis_units = {'log_temperature_K': 'log10(K)', 'log_nH_cm3': 'log10(cm^-3)',
-                  'log_metallicity_Zsun': 'log10(Z/Zsun)', 'redshift': 'dimensionless'}
+                  'log_metallicity_Zsun': 'log10(Z/Zsun)', 'redshift': 'dimensionless',
+                  'log_metal_scale': 'dex'}
     for name, values in result['table_axes'].items():
         dataset = table_axes.create_dataset(name, data=values)
-        dataset.attrs['unit'] = axis_units[name]
+        if 'table_axis_metadata' in result:
+            for key, value in result['table_axis_metadata'][name].items():
+                dataset.attrs[key] = value
+        else:
+            # PS20 and standalone fixtures retain their established definitions.
+            dataset.attrs['unit'] = axis_units[name]
+    if 'table_schema' in result:
+        table = provenance.create_group('emissivity_table')
+        table.attrs['schema'] = result['table_schema']
+        table.attrs['axis_order'] = ', '.join(result['table_axes'])
+        table.attrs['abundance_model'] = result['abundance_model']
+        table.create_dataset('physics_commands_json',
+                             data=json.dumps(result['table_physics'], indent=2),
+                             dtype=h5py.string_dtype('utf-8'))
+        if 'interpolation_method' in result:
+            table.attrs['interpolation_method'] = result['interpolation_method']
+            table.attrs['metallicity_clipping_caveat'] = result['metallicity_clipping_caveat']
+            # CAVEAT: this records the enriched-boundary approximation for Z=0;
+            # provenance must not imply that primordial spectra were computed.
+            table.create_dataset('metallicity_mapping_json',
+                                 data=json.dumps(result['metallicity_mapping'], indent=2),
+                                 dtype=h5py.string_dtype('utf-8'))
 
 
 def save_result(results, parameters: dict) -> Path:
@@ -133,9 +177,14 @@ def save_result(results, parameters: dict) -> Path:
                                                      else 'luminosity divided by full voxel volume')
                 for name in ('input_particle_count', 'included_particle_count', 'excluded_particle_count',
                              'input_luminosity_erg_s', 'included_luminosity_erg_s', 'excluded_luminosity_erg_s',
-                             'clipped_particle_count', 'abundance_model'):
+                             'clipped_particle_count', 'abundance_model',
+                             'zero_metallicity_particle_count', 'metallicity_clipped_particle_count',
+                             'zero_emissivity_particle_count', 'interpolation_method',
+                             'metallicity_clipping_caveat'):
                     if name in result:
                         group.attrs[name] = result[name]
+                if 'clipping_counts' in result:
+                    group.attrs['clipping_counts_json'] = json.dumps(result['clipping_counts'])
                 count += 1
             if count != len(labels) or count == 0:
                 raise ValueError('The run did not produce all requested line cubes.')

@@ -8,10 +8,10 @@ def make_ppv_cube(gas_fields: dict, particle_luminosity_erg_s, x_edges_kpc, y_ed
     """Bin particle luminosities into a simple position-position-velocity cube.
 
     ``gas_fields`` uses the keys from ``convert_gas_fields`` and
-    ``particle_luminosity_erg_s`` can be passed from
-    ``ps20.calculate_particle_line_luminosity``. The cube is returned in array
-    order ``(velocity, y, x)``. Its values are summed particle luminosities
-    per voxel (erg s^-1); no smoothing or spectral broadening is applied.
+    ``particle_luminosity_erg_s`` can be passed from ``ps20.calculate_particle_line_luminosity``.
+    The cube is returned in array order ``(x, y, velocity)``. Here x/y denote
+    the image axes; their simulation-axis names are returned as metadata.
+    Its values are summed particle luminosities per voxel (erg s^-1); no smoothing or spectral broadening is applied.
 
     The three Cartesian viewing directions use:
       - ``los_axis='z'``: image x-y, velocity v_z
@@ -56,6 +56,8 @@ def make_ppv_cube(gas_fields: dict, particle_luminosity_erg_s, x_edges_kpc, y_ed
             raise ValueError(f'{name} contains non-finite values.')
     if len({values.size for values in particle_arrays.values()}) != 1:
         raise ValueError('Positions, velocities, and luminosities must align by particle.')
+    if np.any(particle_luminosity_erg_s < 0):
+        raise ValueError('Particle luminosities must not be negative.')
 
     validated_edges = []
     for name, values in (
@@ -76,21 +78,32 @@ def make_ppv_cube(gas_fields: dict, particle_luminosity_erg_s, x_edges_kpc, y_ed
         validated_edges.append(edges)
     x_edges_kpc, y_edges_kpc, velocity_edges_kms = validated_edges
 
-    # histogramdd bins in (x, y, velocity) order; transpose to the common
-    # cube storage order (velocity, y, x).
-    binned, _ = np.histogramdd(
+    # histogramdd already returns the v2 storage order (image x, image y, velocity).
+    cube, _ = np.histogramdd(
         np.column_stack((image_x, image_y, line_of_sight_velocity)),
         bins=(x_edges_kpc, y_edges_kpc, velocity_edges_kms),
         weights=particle_luminosity_erg_s,
     )
-    cube = binned.transpose(2, 1, 0)
+
+    inside = np.ones(particle_luminosity_erg_s.size, dtype=bool)
+    for coordinate, axis_edges in zip(
+        (image_x, image_y, line_of_sight_velocity), validated_edges,
+    ):
+        inside &= (coordinate >= axis_edges[0]) & (coordinate <= axis_edges[-1])
 
     return {
         'cube_erg_s': cube,
+        'cube_axis_order': 'x,y,velocity',
         'image_x_edges_kpc': np.asarray(x_edges_kpc),
         'image_y_edges_kpc': np.asarray(y_edges_kpc),
         'velocity_edges_kms': np.asarray(velocity_edges_kms),
         'image_x_axis': image_x_name,
         'image_y_axis': image_y_name,
         'los_axis': los_axis,
+        'input_particle_count': particle_luminosity_erg_s.size,
+        'included_particle_count': int(np.count_nonzero(inside)),
+        'excluded_particle_count': int(np.count_nonzero(~inside)),
+        'input_luminosity_erg_s': float(particle_luminosity_erg_s.sum()),
+        'included_luminosity_erg_s': float(particle_luminosity_erg_s[inside].sum()),
+        'excluded_luminosity_erg_s': float(particle_luminosity_erg_s[~inside].sum()),
     }

@@ -1,43 +1,62 @@
-# SIMBA snapshot and its matching Octavius catalogue.
-input_source: simba
-snapshot_filename: /scr/user/jiaheak/SIMBA_data/snap_m50n512_151.hdf5
+# Paths may be absolute or relative to this YAML file.
+source:
+  type: simba
+  snapshot_filename: /scr/user/jiaheak/SIMBA_data/snap_m50n512_151.hdf5
+  catalogue_filename: /scr/user/jiaheak/Octavius_results/output/octavius_snap_m50n512_151.hdf5
+  redshift: auto  # Snapshot redshift; numerical overrides remain possible
 
 selection:
-  group_type: halo  # halo or galaxy; each has its own index collection
-  catalogue_filename: /scr/user/jiaheak/Octavius_results/output/octavius_snap_m50n512_151.hdf5
-  target_index: 0  # Collection index, not ParticleID or HaloID
+  group_type: halo  # Current CGM filter supports halo targets only
+  target_index: 0  # Octavius collection index, not ParticleID or HaloID
+  # CGM filter currently uses r <= r200m and nH <= 0.13 cm^-3.
+
+unit_factors:
+  # Unit-scale conversion inputs below contain no a/h correction.
+  # simba.compute_conversion_factors() keeps to_physical and to_units separate;
+  # the emission pipeline combines both stages once.
+  # SIMBA convention: comoving kpc/h, 1e10 Msun/h, and raw velocity * sqrt(a).
+  # Catalogue positions/velocities are already converted by Octavius.
+  # Use explicit signs in scientific exponents so PyYAML reads numbers.
+  solar_mass_g: 1.988416e+33  # unit in g  
+  kpc_to_cm: 3.0856775814913673e+21
+  specific_energy_to_erg_g: 1.0e+10  # (km/s)^2 -> erg/g; no extra a or h factor
+  # Dimensionless gas-model parameters, not unit or cosmological conversions:
+  z_sun_mass_fraction: 0.0134
+  # gamma: 1.6666666666666667  # Optional; default is 5/3
 
 emissivity:
-  type: cloudy_hdf5
-  # table_filename: /scr/user/jiaheak/Cloudy_tables/UVB_dust1_CR1_G1_shield0_lines.hdf5 
-  table_filename: /scr/user/jiaheak/Cloudy_tables/simba_hot_cgm_mvp.hdf5
-  # line_label: 'H  1      6562.81A'  # Exact PS20 identifier, including spaces
-  line_label: 'O  8 18.9689A'
+  type: cloudy_hdf5  # ps20 | cloudy_hdf5; both require one HDF5 table
+  table_filename: /scr/user/jiaheak/Cloudy_tables/simba_hot_cgm_multiline.hdf5
+  # Exact table identifiers, including spaces; output groups follow this order.
+  line_labels:
+    - 'O  7 21.6000A'
+    - 'O  7 22.1000A'
+    - 'O  8 18.9689A'
+    - 'Ne 9 13.4500A'
+    - 'Ne 9 13.7000A'
+    - 'Ne10 12.1300A'
+  # For PS20, for example:
+  # type: ps20
+  # table_filename: /scr/user/jiaheak/Cloudy_tables/UVB_dust1_CR1_G1_shield0_lines.hdf5
+  # line_labels: ['H  1      6562.81A']
 
-# These values match the previous example; verify for your snapshot.
-# Use an explicit sign in scientific-notation exponents so PyYAML reads numbers.
-unit_factors:
-  position_to_physical_kpc: 1.4705882352941175
-  velocity_to_kms: 1.0
-  mass_to_g: 2.9241321628e+43
-  density_to_g_cm3: 3.1294794215e-22
-  specific_energy_to_erg_g: 1.0e+10
-  z_sun_mass_fraction: 0.0134
+cube:
+  type: ppp  # v2 array order: ppv (x,y,velocity); ppp (x,y,z)
+  center_kpc: auto  # Selected halo's physical minpot_pos
+  periodic: true  # Wrap cube offsets across the simulation box
+  map_half_width_kpc: 1600
+  spatial_bins: 100  # Per spatial axis; PPP uses these for z as well
+  # PPV only (ignored for PPP):
+  velocity_half_width_kms: 300
+  velocity_bins: 80
+  los_axis: z
+  systemic_velocity_kms: auto  # Halo bulk velocity component along los_axis
+  # Optional explicit edges override width/bin-count settings:
+  # x_edges_kpc: [-100, 0, 100]
+  # y_edges_kpc: [-100, 0, 100]
+  # z_edges_kpc: [-100, 0, 100]  # PPP only
+  # velocity_edges_kms: [-300, 0, 300]  # PPV only
 
-cube_type: ppv  # ppv: (velocity, y, x); ppp: (z, y, x)
-center_kpc: auto  # Read the selected object's physical center
-map_half_width_kpc: 100
-spatial_bins: 60  # Number of bins per spatial axis
-# Velocity and line-of-sight settings below apply only to PPV.
-# PPP uses map_half_width_kpc and spatial_bins for all three spatial axes.
-velocity_half_width_kms: 300
-velocity_bins: 40
-# Optional explicit edges override the width/bin-count settings above:
-# x_edges_kpc: [-100, 0, 100]
-# y_edges_kpc: [-100, 0, 100]
-# z_edges_kpc: [-100, 0, 100]  # Optional PPP depth edges
-# velocity_edges_kms: [-300, 0, 300]
-los_axis: z
-systemic_velocity_kms: auto  # Selected object's bulk velocity along los_axis
-periodic: true
-output_filename: output_line_cube.npz  # Or auto for an informative filename
+output:
+  filename: output_line_cubes_v2.hdf5  # All requested lines; or auto
+  # Existing outputs are not overwritten; choose a new filename for each run.
