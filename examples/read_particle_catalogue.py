@@ -18,11 +18,11 @@ print(catalogue.describe())
 line = args.line or catalogue.line_labels[0]
 # Defaults come from the YAML reference frame. center='halo' selects the
 # original halo centre even if YAML specified a different default centre.
-image = catalogue.make_map(line, los_axis='z', half_width_kpc=args.width_kpc, bins=256)
+image = catalogue.make_map(line=line, field='luminosity', los_axis='z', half_width_kpc=args.width_kpc, bins=256)
 spectrum = catalogue.make_spectrum(line, np.linspace(-300, 300, 101),
                                    los_axis='z', aperture_radius_kpc=args.width_kpc)
-catalogue.plot(image)
-catalogue.plot(spectrum)
+catalogue.plot_map(image, show=False)
+catalogue.plot_spectrum(spectrum, show=False)
 print('Map included/excluded luminosity:', image['included_luminosity_erg_s'], image['excluded_luminosity_erg_s'])
 print('Spectrum included/excluded luminosity:', spectrum['included_luminosity_erg_s'], spectrum['excluded_luminosity_erg_s'])
 plt.show()

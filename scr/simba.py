@@ -280,31 +280,15 @@ def get_gas_fields(filename, gas_rows, components=SIMBA_GAS_COMPONENTS) -> dict:
         }
 
 
-def convert_gas_fields(                 # This is given by Codex, we should make sure the unit convention !!!
-    raw_fields: dict, *, position_to_physical_kpc: float, velocity_to_kms: float, mass_to_g: float,
-    density_to_g_cm3: float, specific_energy_to_erg_g: float, z_sun_mass_fraction: float, gamma: float = 5.0 / 3.0 ) -> dict:
-    """Convert selected SIMBA arrays to the physical fields used downstream.
+def gas_temperature_and_hydrogen_fraction(raw_fields, *, specific_energy_to_erg_g, gamma=5.0 / 3.0):
+    """Convert specific internal energy using the SIMBA H, He and electron abundances.
 
-    Conversion factors must already account for the snapshot's scale factor
-    and Hubble convention. The abundance columns and electron abundance are
-    interpreted according to the SIMBA snapshot convention.
-
-    Returns: gas_fields (dict): aligned physical positions, velocities, mass,
-        density, volume, temperature, hydrogen density, and abundance arrays.
+    Returns: thermal_state (tuple[numpy.ndarray, numpy.ndarray]): temperature in K
+        and dimensionless hydrogen mass fraction, aligned by particle.
     """
     proton_mass_g = PROTON_MASS_G
     boltzmann_erg_k = 1.380649e-16
 
-    coordinates = np.asarray(
-        raw_fields['PartType0/Coordinates'], dtype=np.float64
-    ) * position_to_physical_kpc
-    velocities = np.asarray(
-        raw_fields['PartType0/Velocities'], dtype=np.float64
-    ) * velocity_to_kms
-    mass_g = np.asarray(raw_fields['PartType0/Masses'], dtype=np.float64) * mass_to_g
-    rho_g_cm3 = np.asarray(
-        raw_fields['PartType0/Density'], dtype=np.float64
-    ) * density_to_g_cm3
     internal_energy_erg_g = np.asarray(
         raw_fields['PartType0/InternalEnergy'], dtype=np.float64
     ) * specific_energy_to_erg_g
@@ -333,6 +317,36 @@ def convert_gas_fields(                 # This is given by Codex, we should make
         / boltzmann_erg_k
     )
 
+    return temperature_k, hydrogen_mass_fraction
+
+
+def convert_gas_fields(                 # This is given by Codex, we should make sure the unit convention !!!
+    raw_fields: dict, *, position_to_physical_kpc: float, velocity_to_kms: float, mass_to_g: float,
+    density_to_g_cm3: float, specific_energy_to_erg_g: float, z_sun_mass_fraction: float, gamma: float = 5.0 / 3.0 ) -> dict:
+    """Convert selected SIMBA arrays to the physical fields used downstream.
+
+    Conversion factors must already account for the snapshot's scale factor
+    and Hubble convention. The abundance columns and electron abundance are
+    interpreted according to the SIMBA snapshot convention.
+
+    Returns: gas_fields (dict): aligned physical positions, velocities, mass,
+        density, volume, temperature, hydrogen density, and abundance arrays.
+    """
+    coordinates = np.asarray(
+        raw_fields['PartType0/Coordinates'], dtype=np.float64
+    ) * position_to_physical_kpc
+    velocities = np.asarray(
+        raw_fields['PartType0/Velocities'], dtype=np.float64
+    ) * velocity_to_kms
+    mass_g = np.asarray(raw_fields['PartType0/Masses'], dtype=np.float64) * mass_to_g
+    rho_g_cm3 = np.asarray(
+        raw_fields['PartType0/Density'], dtype=np.float64
+    ) * density_to_g_cm3
+    abundances = np.asarray(raw_fields['PartType0/Metallicity'], dtype=np.float64)
+    Z_mass_fraction = abundances[:, 0]
+    temperature_k, hydrogen_mass_fraction = gas_temperature_and_hydrogen_fraction(
+        raw_fields, specific_energy_to_erg_g=specific_energy_to_erg_g, gamma=gamma)
+
     return {
         'particle_id': raw_fields['PartType0/ParticleIDs'],
         'x_kpc': coordinates[:, 0],
@@ -344,7 +358,7 @@ def convert_gas_fields(                 # This is given by Codex, we should make
         'mass_g': mass_g,
         'rho_g_cm3': rho_g_cm3,
         'volume_cm3': mass_g / rho_g_cm3,
-        'nH_cm3': hydrogen_mass_fraction * rho_g_cm3 / proton_mass_g,
+        'nH_cm3': hydrogen_mass_fraction * rho_g_cm3 / PROTON_MASS_G,
         'T_K': temperature_k,
         'Z_Zsun': Z_mass_fraction / z_sun_mass_fraction,
         # Preserve the actual particle fractions for Cloudy's metal/H mapping.

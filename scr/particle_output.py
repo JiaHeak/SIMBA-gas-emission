@@ -1,5 +1,6 @@
 """Atomic, chunked HDF5 storage for reusable particle emission results."""
 import json
+from contextlib import ExitStack
 import os
 from pathlib import Path
 import tempfile
@@ -10,12 +11,50 @@ import yaml
 SCHEMA = 'codex_simba_particle_emission_v1'
 
 
-def _json(value):
-    """Serialize small numerical metadata without losing its named structure.
+def _json(value, *, hdf5_filename=None):
+    """Serialize numerical/string metadata, retaining HDF5 reference targets.
 
-    Returns: text (str): JSON with NumPy scalars/arrays represented as numbers/lists.
+    Byte strings use strict UTF-8. Structured NumPy records keep field names.
+    HDF5 object references require their original source filename and become
+    {'hdf5_object_path': '/dataset/path'} records relative to that file, not
+    opaque process-local handles. Region references and unsupported objects
+    raise; nonfinite numbers remain forbidden. Source files are read-only.
+
+    Returns: text (str): portable JSON metadata with arrays/numbers/decoded strings.
     """
-    return json.dumps(value, default=lambda x: x.tolist(), allow_nan=False)
+    with ExitStack() as stack:
+        source = None
+
+        def encode(item):
+            """Convert explicitly supported metadata types without stringifying others.
+
+            Returns: encoded (str, dict, list, tuple, int, float, bool or NoneType):
+                JSON-compatible representation; unsupported values raise TypeError.
+            """
+            nonlocal source
+            if isinstance(item, (bytes, np.bytes_)):
+                return bytes(item).decode('utf-8')
+            if isinstance(item, h5py.RegionReference):
+                raise TypeError('HDF5 region references cannot be represented by an object path alone.')
+            if isinstance(item, h5py.Reference):
+                if hdf5_filename is None:
+                    raise TypeError('HDF5 object references require hdf5_filename for resolution.')
+                if source is None:
+                    source = stack.enter_context(h5py.File(hdf5_filename, 'r'))
+                return {'hdf5_object_path': source[item].name if item else None}
+            if isinstance(item, np.ndarray):
+                if item.dtype.names:
+                    return list(item) if item.ndim else item[()]
+                return item.tolist()
+            if isinstance(item, np.void) and item.dtype.names:
+                return {name: item[name] for name in item.dtype.names}
+            if isinstance(item, np.generic):
+                converted = item.item()
+                if not isinstance(converted, np.generic):
+                    return converted
+            raise TypeError(f'Unsupported JSON metadata type: {type(item).__name__}')
+
+        return json.dumps(value, default=encode, allow_nan=False)
 
 
 def save_particle_catalogue(gas, emissions, parameters, run):
@@ -88,7 +127,8 @@ def save_particle_catalogue(gas, emissions, parameters, run):
             model = run['table']
             metadata = {key: value for key, value in model['data'].items()
                         if key != 'volume_emissivity_erg_s_cm3'}
-            provenance.create_dataset('table_metadata_json', data=_json(metadata))
+            provenance.create_dataset('table_metadata_json',
+                                      data=_json(metadata, hdf5_filename=model['table_filename']))
             provenance.attrs.update(table_type=model['table_type'], table_filename=model['table_filename'],
                                     snapshot_filename=parameters['source']['snapshot_filename'],
                                     catalogue_filename=parameters['source']['catalogue_filename'],
@@ -101,11 +141,20 @@ def save_particle_catalogue(gas, emissions, parameters, run):
                     raise ValueError('Emission line order differs from configuration.')
                 epsilon = np.asarray(emission['volume_emissivity_erg_s_cm3'])
                 luminosity = np.asarray(emission['line_luminosity_erg_s'])
-                for values in (epsilon, luminosity):
-                    if values.shape != (n,) or not np.all(np.isfinite(values)) or np.any(values < 0):
-                        raise ValueError('Emission must be finite, nonnegative and aligned by particle.')
-                if not np.allclose(luminosity, epsilon * arrays['volume_cm3'], rtol=1e-12, atol=0):
-                    raise ValueError('Particle luminosity does not equal emissivity times volume.')
+                if epsilon.shape != (n,) or luminosity.shape != (n,):
+                    raise ValueError(f'Emission arrays must align with all {n} particles for {labels[index]}.')
+                with np.errstate(over='ignore', invalid='ignore'):
+                    expected_luminosity = epsilon * arrays['volume_cm3']
+                    valid = (np.isfinite(epsilon) & (epsilon >= 0)
+                             & np.isfinite(luminosity) & (luminosity >= 0)
+                             & np.isfinite(expected_luminosity)
+                             & np.isclose(luminosity, expected_luminosity, rtol=1e-12, atol=0))
+                failed_count = int(np.count_nonzero(~valid))
+                if failed_count:
+                    raise ValueError(f'Emission validation failed for {labels[index]}: '
+                                     f'{failed_count} failed / {n} particles; '
+                                     'require finite nonnegative emissivity/luminosity and L=epsilon*V. '
+                                     'No catalogue will be published.')
                 line = lines.create_group(f'line_{index:04d}')
                 line.attrs['line_label'] = labels[index]
                 for name, values, unit in [('volume_emissivity_erg_s_cm3', epsilon, 'erg s^-1 cm^-3'),
@@ -113,6 +162,22 @@ def save_particle_catalogue(gas, emissions, parameters, run):
                     line.create_dataset(name, data=values, chunks=True, compression='gzip', shuffle=True).attrs['unit'] = unit
                 diagnostic = {key: value for key, value in emission.items()
                               if key not in ('volume_emissivity_erg_s_cm3', 'line_luminosity_erg_s', 'log_volume_emissivity')}
+                zero_count = int(np.count_nonzero(epsilon == 0))
+                for key, actual in (('input_particle_count', n), ('computed_particle_count', n),
+                                    ('failed_particle_count', 0), ('positive_emissivity_particle_count', n-zero_count),
+                                    ('zero_emissivity_particle_count', zero_count)):
+                    if key in diagnostic and diagnostic[key] != actual:
+                        raise ValueError(f'Inconsistent {key} for {labels[index]}: '
+                                         f'reported {diagnostic[key]}, measured {actual}.')
+                diagnostic.update(input_particle_count=n, computed_particle_count=n,
+                                  failed_particle_count=0,
+                                  positive_emissivity_particle_count=n-zero_count,
+                                  zero_emissivity_particle_count=zero_count,
+                                  computation_counts_source='writer_validation',
+                                  computation_counts_note=(
+                                      'Numerical checks: finite nonnegative epsilon/L and L=epsilon*V. '
+                                      'Exact zeros count as computed; clipped results also count as computed. '
+                                      'This does not establish physical accuracy. Invalid results abort the run.'))
                 line.attrs['diagnostics_json'] = _json(diagnostic)
                 count += 1
             if count != len(labels):
