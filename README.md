@@ -1,207 +1,155 @@
 # SIMBA CGM line-emission pipeline
 
-**SIMBA + Octavius · Multiple emission lines · PPP / PPV cubes · One HDF5 output**
-
-Select halo gas, derive its physical state, interpolate emissivities, and map intrinsic line emission.
-
-> **Current scope:** halo targets only; HDF5 emissivity inputs; one cube mode per run. Products are intrinsic emission predictions, not instrument-ready observations.
-
-## Workflow at a glance
+**One SIMBA halo · Multiple emission lines · One reusable particle catalogue**
 
 ```mermaid
 flowchart TD
-    A["YAML settings"] --> D["Validate inputs and requested lines"]
-    B["SIMBA snapshot + matching Octavius catalogue"] --> D
-    C["Precomputed HDF5 emissivity table"] --> D
-    D --> E["Halo membership → CGM gas rows"]
-    E --> F["Physical gas fields + centered coordinates"]
-    F --> G["For each requested line:<br/>interpolate emissivity → particle luminosity"]
-    G --> H{"Choose cube.type"}
-    H -->|ppp| I["Spatial cube: x, y, z<br/>bin → mild smoothing"]
-    H -->|ppv| J["Spectral cube: image x, image y, velocity"]
-    I --> K["One structured HDF5 file"]
-    J --> K
-    K --> L["Plot maps, slices and profiles"]
+    A["SIMBA snapshot + matching Octavius catalogue"] --> B["Select halo CGM gas and convert units"]
+    B --> C["Interpolate emissivity and calculate particle luminosity"]
+    Q["Cloudy input, grid and emissivity files"] --> T["Convert to one HDF5 emissivity table"]
+    T --> C
+    C --> D["HDF5 emission catalogue (Particle-based)"]
+    D --> |Reader_Object| E["Maps · Spectra · Profiles · Line ratios"] -.-> F
+    D --> F["Selected particle IDs"]
+    S["Original SIMBA snapshots"] --> G["Read physical gas fields and track earlier gas"]
+    F --> G
 
-    classDef inputs fill:#e7f0fa,stroke:#4d7ea8,color:#17324d;
-    classDef compute fill:#eaf4e3,stroke:#70ad47,color:#315623;
-    classDef product fill:#eee8f5,stroke:#8064a2,color:#403152;
-    class A,B,C inputs;
-    class D,E,F,G,H compute;
-    class I,J,K,L product;
+    classDef input fill:#DBEAFE,stroke:#2563EB,color:#172554;
+    classDef process fill:#DCFCE7,stroke:#15803D,color:#14532D;
+    classDef data fill:#FEF3C7,stroke:#B45309,color:#78350F;
+    classDef result fill:#EDE9FE,stroke:#7C3AED,color:#3B0764;
+
+    class A,Q,S input;
+    class B,C,G,T process;
+    class D,F data;
+    class E result;
+
+        subgraph legend [Legend]
+        direction LR
+        L1["Input"]:::input
+        L2["Our Pipeline"]:::process
+        L3["Data product"]:::data
+        L4["Analysis output"]:::result
+    end
 ```
 
-- Halo membership supplies **snapshot row indices**, not ParticleIDs.
-- CGM filter: **radius ≤ r200m**, **nH ≤ 0.13 cm⁻³**; periodic distances from the halo minimum-potential position. No inner-radius or temperature cut.
-- Gas conversion/centering are shared across lines. Cloudy loads once; line cubes are processed and written sequentially.
+The CGM selection uses Octavius halo membership, periodic distance from the
+halo minimum-potential position, **r ≤ r₂₀₀ₘ**, and **nH ≤ 0.13 cm⁻³**.
 
-## Run
+## Prepare the Cloudy table
 
-**Dependencies:** NumPy, SciPy, h5py, PyYAML and Octavius; Matplotlib for plots, Jupyter for notebooks.
+The pipeline includes a [Cloudy converter](scr/tables/hdf5_converter.py) that
+packages the emissivity grid, axes, exact line labels, and provenance from
+one completed Cloudy run into a single HDF5 file. The emission calculation
+then needs only that table.
 
-1. Copy [config.example.yaml](config.example.yaml) to your own YAML file.
-2. Set matching snapshot/catalogue paths, the halo index, table, requested lines and cube bins.
-3. **Check the snapshot's unit convention.** YAML constants and snapshot `a`/`h` corrections are combined once.
+```bash
+python scr/tables/hdf5_converter.py \
+    --input model.in --grid model.grd --emis model.emis \
+    --output cloudy_emissivity.hdf5
+```
 
-From the `Pipeline/` directory:
+This example uses sequential model order. For a Cloudy C25 run with verified
+model indices in both output files, use `--model-order cloudy-c25-index`.
+You can also pass the Cloudy log with `--out model.out` to record it as
+provenance.
+
+## Run the pipeline
+
+Use a Python environment with NumPy, SciPy, h5py, PyYAML and Octavius. Plots use Matplotlib.
+
+1. Copy [config.example.yaml](config.example.yaml) to `config.yaml` and edit the inputs below.
+2. Run from the `SIMBA-gas-emission` directory.
 
 ```bash
 python scr/pipeline.py config.yaml
 ```
 
-For HPC runs, edit `run_config` and check site paths/environment/resources. From `Pipeline/`:
+| YAML section | What to set |
+| --- | --- |
+| `source` | Matching SIMBA snapshot and Octavius catalogue. `redshift: auto` uses the snapshot header. |
+| `selection` | `group_type: halo` and the Octavius collection index `target_index`. |
+| `unit_factors` | Unit constants and gas parameters. The pipeline derives scale-factor and Hubble corrections from the snapshot. |
+| `emissivity` | `type: cloudy_hdf5`, `table_filename: cloudy_emissivity.hdf5`, and a list of exact `line_labels` including internal spaces. |
+| `reference_frame` | Default Reader center, bulk velocity and periodic wrapping. `auto` uses halo values. |
+| `output` | A new `.hdf5` or `.h5` filename. `auto` gives `particle_emission_halo_<index>.hdf5`. |
+
+Relative paths resolve from the YAML directory. Choose a new filename for each run.
+
+### Submit a batch job
+
+On a Slurm cluster, save this example as `run_pipeline.slurm`. Adjust the
+memory and time for your run, and add any scheduler directives your cluster
+requires, such as an account or partition.
 
 ```bash
-sbatch jobs/run_pipeline_UMHPC.slurm  # UMHPC
-qsub jobs/run_pipeline_Gravity.pbs   # Gravity; choose one site
+#!/bin/bash
+#SBATCH --job-name=simba-emission
+#SBATCH --cpus-per-task=1
+#SBATCH --mem=16G
+#SBATCH --time=02:00:00
+#SBATCH --output=simba-emission-%j.log
+
+set -eu
+cd "$SLURM_SUBMIT_DIR"
+python scr/pipeline.py config.yaml
 ```
 
-Job templates: [UMHPC Slurm](jobs/run_pipeline_UMHPC.slurm) · [Gravity PBS](jobs/run_pipeline_Gravity.pbs).
+Activate the Python environment with the pipeline dependencies and submit
+from the `SIMBA-gas-emission` directory.
 
-### Configuration guide
+```bash
+sbatch run_pipeline.slurm
+```
 
-| YAML section | What it controls |
+## Emission model and HDF5 output
+
+For each particle and line, **L = ε m/ρ**. The pipeline stores
+volume emissivity in erg s⁻¹ cm⁻³ and luminosity in erg s⁻¹.
+
+The Cloudy adapter interpolates linear emissivity on log T, log nH and
+optional log metal scale. It preserves table zeros and checks the recorded
+radiation redshift. Metal grids use the table's reference metal/H ratio.
+Out-of-grid coordinates are clipped and counted. **On metal grids, Z = 0
+uses the lowest enriched model**, which can produce artificial metal emission.
+
+| HDF5 group | Contents |
 | --- | --- |
-| `source` | SIMBA snapshot, Octavius catalogue, redshift |
-| `selection` | `group_type: halo` and `target_index` — an Octavius collection index |
-| `unit_factors` | Unit constants and gas-model parameters; snapshot `a`/`h` factors are derived separately |
-| `emissivity` | Adapter, one HDF5 table, ordered `line_labels` list |
-| `cube` | PPP/PPV mode, center, extent, bins and PPV viewing settings |
-| `output` | One `.hdf5` or `.h5` filename, or `auto` |
+| `particles/` | Original snapshot rows and IDs, physical box positions, peculiar velocities, volumes and smoothing lengths |
+| `lines/` | Exact labels, per-particle emissivity and luminosity, saved per-line diagnostics |
+| `reference_frame/` | Default and halo centers and bulk velocities, box size and periodic flag |
+| `provenance/` | Input paths, parameters, unit factors and table metadata |
 
-Example sections to edit within the complete YAML:
+Schema `codex_simba_particle_emission_v1`. Inspect line counts and clipping
+where recorded with `catalogue.diagnostics[line]`.
 
-```yaml
-emissivity:
-  type: cloudy_hdf5
-  table_filename: /path/to/simba_cgm_T_nH_metals_hm12_z0p602.hdf5
-  line_labels:                 # Exact stored identifiers, including spaces
-    - 'O  8 18.9689A'
-    - 'H  1 6562.81A'
-
-cube:
-  type: ppp                   # Or ppv
-
-output:
-  filename: line_cubes.hdf5    # All requested lines in this file
-```
-
-- Use a list even for one line; missing/repeated labels raise. Relative paths use **the YAML directory**.
-- `redshift: auto` reads the snapshot; automatic center/bulk velocity come from the selected halo.
-- `map_half_width_kpc` and `spatial_bins` generate edges; explicit edges override them. Map extent does not redefine the CGM filter.
-- `cube.periodic` controls wrapping of centered cube coordinates. CGM radial selection itself uses periodic distances.
-- Existing output files are **not overwritten**. Failed runs do not publish an incomplete final file.
-
-## Scientific model
-
-Particle luminosity follows:
-
-$$
-L_{i,\ell} = \epsilon_\ell(T_i,n_{\mathrm{H},i},\ldots)\,V_i,
-\qquad V_i = \frac{m_i}{\rho_i}.
-$$
-
-Here `epsilon` is volume emissivity in **erg s⁻¹ cm⁻³**, `V` is physical particle volume in **cm³**, and `L` is luminosity in **erg s⁻¹**.
-
-| Adapter | Table inputs | Important assumptions |
-| --- | --- | --- |
-| `cloudy_hdf5` | log T × log nH × optional log metal scale × line | Interpolates **linear emissivity**; fixed radiation redshift and reference element pattern. Legacy T/nH tables keep fixed composition. |
-| `ps20` | Published T, nH, metallicity, redshift and line grids | PS20 log-emissivity interpolation with a dedicated primordial branch. |
-
-**Cloudy HDF5 contract**
-
-- Current table schema: `codex_simba_cloudy_emissivity_v2`; legacy two-axis MVP tables remain supported. Tables and datacubes have distinct schemas.
-- Core datasets: `axes/log_temperature_K`, `axes/log_nH_cm3`, optional `axes/log_metal_scale`, `lines/labels`, `lines/emissivity_erg_s_cm3`; named axes, units and physics are validated.
-- Linear, angle-integrated volume emissivity; exact table zeros remain zero. No emissivity floor, extra density-squared, metallicity multiplier or `4π` factor is applied.
-- Metal grids use **s = (Z/X)/(Z_ref/X_ref)** from particle mass fractions and the verified GASS10 reference, not YAML `Z_sun`. Element ratios and He/H retain the table pattern.
-- Out-of-grid coordinates are clipped for interpolation only. **Caveat: Z=0 uses the lowest nonzero metal scale, not primordial physics**, and can produce artificial metal emission. Warnings and saved per-axis counts expose this approximation.
-- Recorded radiation redshifts must match the run. Convert `.in` + `.grd`/`.grid` + `.emis` with [hdf5_converter.py](scr/tables/hdf5_converter.py); labels and line-match caveats remain in provenance.
-
-## Cube products
-
-| `cube.type` | Array order | Spatial / spectral selection | Additional product |
-| --- | --- | --- | --- |
-| `ppp` | `(x, y, z)` | Physical x, y, z offsets | Voxel volume and volume-averaged emissivity |
-| `ppv` | `(image x, image y, velocity)` | Two image axes and LOS velocity relative to systemic | Velocity edges and viewing-axis metadata |
-
-- `cube_erg_s` contains **summed luminosity per voxel**, not flux or emissivity.
-- PPP emissivity = voxel luminosity / **full voxel volume**; it is not a mean over particle emissivities.
-- Summing a luminosity cube requires **no extra voxel-volume or velocity-bin-width factor**.
-- Particles are first binned by position. PPP then smooths luminosity with **[1/8, 3/4, 1/8] per axis** (RMS 0.5 voxel); reflecting boundaries conserve included luminosity. Emissivity is calculated afterward. PPV retains point deposition.
-- Smoothing is fixed in grid cells, with varying physical width on unequal bins. `make_ppp_cube(..., smoothing=False)` disables it for direct calls; there is currently **no YAML smoothing switch**.
-- Gas outside the spatial/velocity bins remains excluded and is recorded in coverage diagnostics.
-- PPV viewing/systemic-velocity settings do not apply to PPP.
-
-### HDF5 layout
-
-Output schema: `codex_simba_line_cubes_v2`. NPZ is not an output option.
-
-```text
-line_cubes.hdf5
-├── axes/                       # Shared bin edges and units
-├── geometry/
-│   ├── center_kpc
-│   └── voxel_volume_cm3        # PPP only
-├── provenance/                 # Parameters, paths, unit stages, table axes/physics
-└── lines/
-    ├── labels                  # Exact labels in YAML order
-    ├── line_0000/              # line_label attribute identifies the transition
-    │   ├── cube_erg_s
-    │   └── volume_emissivity_erg_s_cm3   # PPP only
-    └── line_0001/ …
-```
-
-Per-line attributes record coverage, luminosities and applicable Cloudy clipping/zero-metal counts. Root attributes record mode, axis order, completion and PPP smoothing. These particle counts are not voxel counts or luminosity fractions.
-
-## Plot the results
-
-Use [Reader_Object](../Reader_Object/reader.py) from the repository root, or start with [04_Reader_mvp.ipynb](../04_Reader_mvp.ipynb):
+## Read and analyse
 
 ```python
-from Reader_Object import read_DataCube
+from Reader_Object import read_EmissionCatalogue
 
-datacube = read_DataCube('Pipeline/line_cubes.hdf5')
-datacube.describe()
-datacube.plot(lines=[0, 1])
-datacube.get_statistics('luminosity', lines=0)
-datacube.plot_radial_profile(lines=[0, 1], bins=20)  # PPP only
+catalogue = read_EmissionCatalogue("particle_emission.hdf5")
+line = catalogue.line_labels[0]
+image = catalogue.make_map(line=line, field="luminosity", half_width_kpc=200, bins=128)
+catalogue.plot_map(image)
 ```
 
-| Shared views | PPP views | PPV views |
+| Task | Reader API | Notes |
 | --- | --- | --- |
-| `plot()`: luminosity projection | `get_fields()`: spatial slices | `get_fields()`: velocity-channel slices |
-| `get_statistics()`: voxel summaries | `get_radial_profile()`: spherical shells | Saved LOS geometry and velocity edges |
-| `get_diagnostics()`: saved particle/coverage counts | `plot_radial_profile()`: emission / shell / cumulative luminosity | `plot()`: velocity-summed map |
+| Fields and metadata | `get_fields()`, `describe()` | `snapshot_row` addresses the original snapshot. `particle_id` stores the particle ID. |
+| Projected maps | `make_map()` → `plot_map()` | Luminosity or observed surface brightness with Tolman dimming. Point bins by default, compact or Gaussian smoothing optional. |
+| Weighted maps | `make_weighted_map()` → `plot_map()` | Temperature or LOS velocity weighted by mass or line luminosity. Temperature and mass weighting require the original snapshot. |
+| Spectra | `make_spectrum()` → `plot_spectrum()` | LOS velocity bins or halo-frame Doppler wavelength bins. Thermal and instrumental broadening are outside the current model. |
+| Radial profiles and ratios | `make_radial_profile()`, `make_line_ratio()`, `make_line_ratio_map()` | Plot the prepared result with `plot_profile()` or `plot_map()`. |
+| Snapshot fields and tracks | `read_RawSnapshot()`, `read_RawSnapshots()` | Use `track_backward()` with complete single-file snapshots from the same run. Read aligned fields with `tracks.get_fields()`, which masks missing matches. |
 
-Maps show **luminosity per image pixel (erg s⁻¹)**. PPP radial mean emissivity is **ΣL/ΣV**; voxels enter shells by their centers. Empty/partial shells are flagged. Log displays mask zeros without a floor. Restart kernels after reader updates.
-
-The older [plot_multi-line_datacubes.ipynb](notebooks/plot_multi-line_datacubes.ipynb) still expects **v1 axis order/schema**; use the reader above for current v2 output.
+[Reader notebook examples](Reader_Object/manual.md) · [Gas tracking guide](Reader_Object/tracking.md)
 
 ## Code map
 
-| Component | Responsibility |
+| Stage | Source |
 | --- | --- |
-| [pipeline.py](scr/pipeline.py) | `main()`: prepare → select halo/CGM gas → calculate lines → save |
-| [input.py](scr/input.py) | `read_parameters()`: YAML validation, defaults and paths; cube settings |
-| [simba.py](scr/simba.py) | Octavius membership, CGM selection, physical-field conversion |
-| [emissivity_tables.py](scr/emissivity_tables.py) + [tables/](scr/tables/) | Model dispatch, table reading and interpolation |
-| [ppp_cube.py](scr/ppp_cube.py) / [ppv_cube.py](scr/ppv_cube.py) | Particle-to-voxel binning, PPP smoothing and luminosity accounting |
-| [output.py](scr/output.py) | Shared HDF5 geometry, per-line products and run provenance |
-| [Reader_Object/reader.py](../Reader_Object/reader.py) | On-demand fields, diagnostics, statistics, maps and PPP radial profiles |
-
-## Limits and roadmap
-
-PPP includes mild grid smoothing; adaptive SPH kernels, thermal broadening, dust attenuation, cosmological dimming, instrument response and noise remain future work. Metal-boundary clipping is an approximation, especially for Z=0.
-
-Development status:
-
-- [ ] Broader Cloudy grids, primordial models and SIMBA-compatible elemental abundances.
-- [ ] Frequency/wavelength coordinates for observation-facing spectral cubes.
-- [ ] Adaptive spatial kernels and thermal/velocity line broadening.
-- [ ] Dust radiative transfer, including MCRT; instrument PSF/LSF and noise.
-- [ ] Other validated ion-population/emission models.
-- [ ] Particle tracking for inflows, outflows and recycling.
-- [ ] Clearly labelled synthetic abundance/phase sensitivity experiments.
-- [ ] Emission line ratios.
-- [x] Datacube reader with statistics and PPP radial profiles.
-- [x] Particle-to-voxel binning with mild PPP smoothing and saved provenance.
+| Configuration and run | [input.py](scr/input.py) · [pipeline.py](scr/pipeline.py) |
+| Selection and gas fields | [simba.py](scr/simba.py) |
+| Emission and export | [emissivity_tables.py](scr/emissivity_tables.py) · [particle_output.py](scr/particle_output.py) |
+| Analysis and tracking | [Reader_Object/](Reader_Object/) |
