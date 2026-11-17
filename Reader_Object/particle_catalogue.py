@@ -13,6 +13,7 @@ SCHEMA = 'codex_simba_particle_emission_v1'
 PARTICLE_UNITS = dict(snapshot_row='dimensionless', particle_id='dimensionless', position_kpc='kpc',
                       velocity_kms='km s^-1', volume_cm3='cm^3', smoothing_length_kpc='kpc')
 LINE_UNITS = {'luminosity_erg_s': 'erg s^-1', 'volume_emissivity_erg_s_cm3': 'erg s^-1 cm^-3'}
+SNAPSHOT_FIELDS = {'temperature': ('T_K', 'K'), 'density': ('rho_g_cm3', 'g cm^-3')}
 LIGHT_SPEED_KMS = 299792.458
 PROFILE_UNITS = {'luminosity': 'erg s^-1', 'cumulative_luminosity': 'erg s^-1',
                  'emission': 'erg s^-1 cm^-3'}
@@ -80,11 +81,30 @@ def _divide_line_values(numerator, denominator, shape, min_denominator):
     return ratio, valid
 
 
-class ParticleEmissionCatalogue:
-    """A read-only catalogue; constructor reads metadata, not particle arrays."""
+def _print_product_units(product):
+    """Print units for a prepared product's values, axes and optional weights.
 
-    def __init__(self, filename):
+    Returns: result (NoneType): prints a single line of unit information.
+    """
+    units = [f"{product['quantity']}: {product['unit']}"]
+    units.extend(f'{name}: {unit}' for name, unit in
+                 zip(product['axis_names'], product['axis_units']))
+    if 'weight_unit' in product:
+        units.append(f"{product['weighted_by']} weights: {product['weight_unit']}")
+    print(' | '.join(units))
+
+
+class ParticleEmissionCatalogue:
+    """A read-only catalogue; constructor reads metadata, not particle arrays.
+
+    All public calls accept verbose=True to print the units of their fields
+    or products. The default is quiet.
+    """
+
+    def __init__(self, filename, *, verbose=False):
         """Validate layout and load small metadata.
+
+        Set verbose=True to print the saved particle, line and reference units.
 
         Returns: result (NoneType): initializes the catalogue interface.
         """
@@ -99,6 +119,7 @@ class ParticleEmissionCatalogue:
                 raise ValueError('Invalid line labels.')
             if len(self.line_labels) != source.attrs['line_count']:
                 raise ValueError('Line count mismatch.')
+            field_units = {}
             for name, unit in PARTICLE_UNITS.items():
                 shape = (self.particle_count, 3) if name in ('position_kpc', 'velocity_kms') else (self.particle_count,)
                 dataset = source['particles/' + name]
@@ -106,11 +127,14 @@ class ParticleEmissionCatalogue:
                     raise ValueError(f'Invalid particle layout/units: {name}')
                 if name in ('particle_id', 'snapshot_row') and not np.issubdtype(dataset.dtype, np.integer):
                     raise ValueError(f'{name} must retain integer precision.')
+                field_units[name] = dataset.attrs['unit']
             reference = source['reference_frame']
+            self._reference_units = {}
             for name in ('center_kpc', 'bulk_velocity_kms', 'halo_center_kpc', 'halo_bulk_velocity_kms', 'box_size_kpc'):
                 unit = 'km s^-1' if 'velocity' in name else 'kpc'
                 if reference[name].attrs.get('unit') != unit:
                     raise ValueError(f'Invalid reference units: {name}')
+                self._reference_units[name] = reference[name].attrs['unit']
             self.center_kpc = _vector(reference['center_kpc'][...])
             self.bulk_velocity_kms = _vector(reference['bulk_velocity_kms'][...])
             self.halo_center_kpc = _vector(reference['halo_center_kpc'][...])
@@ -127,25 +151,47 @@ class ParticleEmissionCatalogue:
                 for name, unit in LINE_UNITS.items():
                     if group[name].shape != (self.particle_count,) or group[name].attrs.get('unit') != unit:
                         raise ValueError('Invalid line field layout/units.')
+                    if index == 0:
+                        field_units[name] = group[name].attrs['unit']
                 self.diagnostics[label] = json.loads(group.attrs['diagnostics_json'])
             self.provenance = dict(source['provenance'].attrs)
             self.table_metadata = json.loads(source['provenance/table_metadata_json'].asstr()[()])
             self.parameters_yaml = source['provenance/parameters_yaml'].asstr()[()]
+        if verbose:
+            for name, unit in {**field_units, **self._reference_units}.items():
+                print(f'{name}: {unit}')
 
-    def describe(self):
+    def describe(self, *, verbose=False):
         """Summarize available particles, lines and reference settings.
+
+        Set verbose=True to print the units of the physical frame fields.
 
         Returns: summary (dict): particle count, line labels and physical frame.
         """
+        if verbose:
+            for name in ('center_kpc', 'bulk_velocity_kms', 'box_size_kpc'):
+                print(f'{name}: {self._reference_units[name]}')
         return dict(particle_count=self.particle_count, line_labels=self.line_labels,
                     center_kpc=self.center_kpc.copy(), bulk_velocity_kms=self.bulk_velocity_kms.copy(),
                     box_size_kpc=self.box_size_kpc, periodic=self.periodic)
 
-    def get_fields(self, field, *, line=None, selection=slice(None)):
-        """Read one field or a contiguous subset without loading other fields.
+    def get_fields(self, field, *, line=None, selection=slice(None), snapshot=None, verbose=False):
+        """Read one field for the requested catalogue rows.
 
-        Returns: values (numpy.ndarray): independent selected particle values.
+        For 'temperature' (K) or 'density' (physical mass density in g/cm³),
+        pass the original snapshot via snapshot=read_RawSnapshot(...). Both
+        use the catalogue's saved conversion factors and a catalogue row
+        selection. Set verbose=True to print the unit.
+
+        Returns: values (numpy.ndarray or numpy scalar): selected particle values.
         """
+        if field in SNAPSHOT_FIELDS:
+            raw_name, unit = SNAPSHOT_FIELDS[field]
+            values = self._get_snapshot_fields(snapshot, selection, (raw_name,))[raw_name]
+            if verbose:
+                print(f'{field}: {unit}')
+            return values
+
         if field in PARTICLE_UNITS:
             path = 'particles/' + field
         elif field in LINE_UNITS:
@@ -155,7 +201,55 @@ class ParticleEmissionCatalogue:
         else:
             raise KeyError(field)
         with h5py.File(self.filename, 'r') as source:
-            return source[path][selection]
+            dataset = source[path]
+            values = dataset[selection]
+            if verbose:
+                print(f"{field}: {dataset.attrs['unit']}")
+            return values
+
+    def _get_snapshot_fields(self, snapshot, selection, fields):
+        """Resolve a catalogue selection and read its snapshot fields together.
+
+        Returns: values (dict): independent selected arrays or scalars.
+        """
+        if not isinstance(snapshot, RawSnapshot):
+            raise TypeError('Snapshot fields require snapshot=read_RawSnapshot(...).')
+        with h5py.File(self.filename, 'r') as source:
+            factors = self._snapshot_unit_factors(source, snapshot)
+            rows = source['particles/snapshot_row'][selection]
+            ids = source['particles/particle_id'][selection]
+        values = self._read_snapshot_fields(
+            snapshot, np.atleast_1d(rows), np.atleast_1d(ids), fields, factors)
+        if np.ndim(rows) == 0:
+            return {name: field_values[0] for name, field_values in values.items()}
+        return values
+
+    @staticmethod
+    def _snapshot_unit_factors(source, snapshot):
+        """Check the snapshot epoch against the saved catalogue conversion factors.
+
+        Returns: factors (dict): catalogue conversion factors for the raw snapshot.
+        """
+        factors = json.loads(source['provenance/unit_factors_json'].asstr()[()])
+        if (not np.isclose(snapshot.scale_factor, factors['scale_factor'], rtol=1e-10, atol=0)
+                or not np.isclose(snapshot.hubble_param, factors['hubble_param'], rtol=1e-10, atol=0)):
+            raise ValueError('Snapshot scale factor or Hubble parameter differs from the catalogue.')
+        return factors
+
+    @staticmethod
+    def _read_snapshot_fields(snapshot, rows, ids, fields, factors):
+        """Read aligned gas fields in bounded HDF5 batches and check particle IDs.
+
+        Returns: values (dict[str, numpy.ndarray]): fields in catalogue selection order.
+        """
+        values = {field: np.empty(len(rows)) for field in fields}
+        for start in range(0, len(rows), 4096):
+            batch = slice(start, start + 4096)
+            raw = snapshot.read_gas_fields(rows[batch], fields=fields,
+                                           unit_factors=factors, particle_ids=ids[batch])
+            for field in fields:
+                values[field][batch] = raw[field]
+        return values
 
     def _spatial_reference(self, center, periodic, chunk_size):
         """Resolve and validate the spatial settings shared by catalogue renders.
@@ -185,7 +279,7 @@ class ParticleEmissionCatalogue:
         return offsets
 
     def _render(self, line, edges, los_axis, center, bulk_velocity, periodic, chunk_size, aperture_radius_kpc,
-                spectrum, *, rest_wavelength_angstrom=None):
+                spectrum: bool, *, rest_wavelength_angstrom=None):
         """Accumulate luminosity from aligned chunks in a chosen frame.
 
         Returns: result (dict): bins, frame, units and conservation accounting.
@@ -248,7 +342,7 @@ class ParticleEmissionCatalogue:
 
     def make_map(self, line, *, field='luminosity', redshift=None, los_axis='z', half_width_kpc=100., bins=128,
                  x_edges_kpc=None, y_edges_kpc=None, center=None, periodic=None,
-                 chunk_size=100000, smoothing=False, sigma_pixels=.5):
+                 chunk_size=100000, smoothing=False, sigma_pixels=.5, verbose=False):
         """Project line luminosity or observed surface brightness along the full LOS.
 
         Use True or 'compact' for 0.5-pixel RMS grid smoothing, or 'gaussian'
@@ -285,19 +379,23 @@ class ParticleEmissionCatalogue:
             result.update(values=values, quantity='surface brightness',
                           unit=SURFACE_BRIGHTNESS_UNIT, redshift=float(redshift),
                           pixel_area_kpc2=pixel_area_kpc2)
+        if verbose:
+            _print_product_units(result)
         return result
 
     def make_weighted_map(self, line=None, los_axis='z', half_width_kpc=100., *,
                           quantity='temperature', weighted_by='mass', bins=128,
                           x_edges_kpc=None, y_edges_kpc=None, center=None, velocity_frame=None,
                           periodic=None, chunk_size=100000, smoothing=False, sigma_pixels=.5,
-                          snapshot=None):
+                          snapshot=None, verbose=False):
         """Project a weighted mean temperature or signed LOS velocity.
 
         Choose mass or a saved line's luminosity as weights. Velocity uses the
         saved bulk velocity by default, or 'halo' or an explicit vector.
         Supply a RawSnapshot for temperature or mass weighting. Its fields
         are read only for particles inside the image, using saved unit factors.
+
+        input snapshot should be a RawSnapshot object.
 
         Returns: image (dict): editable weighted means, additive grids, and mask.
         """
@@ -335,10 +433,7 @@ class ParticleEmissionCatalogue:
         with h5py.File(self.filename, 'r') as source:
             particles = source['particles']
             if fields:
-                factors = json.loads(source['provenance/unit_factors_json'].asstr()[()])
-                if (not np.isclose(snapshot.scale_factor, factors['scale_factor'], rtol=1e-8, atol=0)
-                        or not np.isclose(snapshot.hubble_param, factors['hubble_param'], rtol=1e-8, atol=0)):
-                    raise ValueError('Snapshot scale factor or Hubble parameter differs from the catalogue.')
+                factors = self._snapshot_unit_factors(source, snapshot)
             if weighted_by == 'luminosity':
                 luminosities = source[f'lines/line_{self.line_labels.index(line):04d}/luminosity_erg_s']
             for start in range(0, self.particle_count, chunk_size):
@@ -353,14 +448,7 @@ class ParticleEmissionCatalogue:
                 if fields:
                     rows = particles['snapshot_row'][selection][inside]
                     ids = particles['particle_id'][selection][inside]
-                    # Limit scattered HDF5 selections without shrinking catalogue reads.
-                    values = {field: np.empty(len(rows)) for field in fields}
-                    for offset in range(0, len(rows), 4096):
-                        batch = slice(offset, offset + 4096)
-                        raw = snapshot.read_gas_fields(rows[batch], fields=fields,
-                                                       unit_factors=factors, particle_ids=ids[batch])
-                        for field in fields:
-                            values[field][batch] = raw[field]
+                    values = self._read_snapshot_fields(snapshot, rows, ids, fields, factors)
                 if quantity == 'temperature':
                     samples = values['T_K']
                 else:
@@ -388,9 +476,75 @@ class ParticleEmissionCatalogue:
                       excluded_particle_count=self.particle_count - included_count)
         if fields:
             result['snapshot_filename'] = str(snapshot.filename)
-        return finish_weighted_map(result, configuration)
+        result = finish_weighted_map(result, configuration)
+        if verbose:
+            _print_product_units(result)
+        return result
 
-    def plot_map(self, image, *, log=None, cmap='magma', ax=None, show=True):
+    def make_phase_diagram(self, *, selection=slice(None), snapshot=None, bins=80, verbose=False):
+        """Bin selected particles by physical gas density and temperature.
+
+        Selection uses catalogue rows, including a Boolean mask of length
+        particle_count. True includes a particle. The saved snapshot path is
+        used by default. Pass a RawSnapshot if that file has moved. Each bin
+        counts particles, with equally spaced logarithmic edges on both axes.
+
+        Returns: phase (dict): counts indexed by density then temperature,
+            with physical bin edges and units.
+        """
+        if isinstance(bins, (bool, np.bool_)) or not isinstance(bins, (int, np.integer)) or bins < 1:
+            raise ValueError('bins must be a positive integer.')
+        if snapshot is None:
+            snapshot = RawSnapshot(self.provenance['snapshot_filename'])
+        fields = self._get_snapshot_fields(snapshot, selection, ('rho_g_cm3', 'T_K'))
+        density = np.atleast_1d(fields['rho_g_cm3'])
+        temperature = np.atleast_1d(fields['T_K'])
+        if not density.size:
+            raise ValueError('The phase diagram selection contains no particles.')
+        if np.any(density <= 0) or np.any(temperature <= 0):
+            raise ValueError('A logarithmic phase diagram requires positive density and temperature.')
+
+        counts, log_density_edges, log_temperature_edges = np.histogram2d(
+            np.log10(density), np.log10(temperature), bins=bins)
+        result = dict(product_type='phase_diagram', quantity='particle count per bin',
+                      values=counts.astype(np.int64),
+                      edges=[10**log_density_edges, 10**log_temperature_edges],
+                      axis_names=['density', 'temperature'],
+                      axis_units=[SNAPSHOT_FIELDS[name][1] for name in ('density', 'temperature')],
+                      unit='particles', particle_count=len(density))
+        if verbose:
+            _print_product_units(result)
+        return result
+
+    def plot_phase_diagram(self, phase, *, ax=None, cmap='viridis', show=True, verbose=False):
+        """Plot a prepared density–temperature diagram with logarithmic axes.
+
+        Returns: ax (matplotlib.axes.Axes): plotted axes for customization or saving.
+        """
+        import matplotlib.pyplot as plt
+
+        if not isinstance(phase, dict) or phase.get('product_type') != 'phase_diagram':
+            raise ValueError('Expected a phase diagram from make_phase_diagram().')
+        density_edges, temperature_edges = (_edges(edges) for edges in phase['edges'])
+        counts = np.asarray(phase['values'])
+        if (density_edges[0] <= 0 or temperature_edges[0] <= 0
+                or counts.shape != (len(density_edges) - 1, len(temperature_edges) - 1)
+                or not np.all(np.isfinite(counts)) or np.any(counts < 0)):
+            raise ValueError('Expected positive bin edges and finite nonnegative counts on the phase grid.')
+        if ax is None:
+            _, ax = plt.subplots()
+        image = ax.pcolormesh(density_edges, temperature_edges, counts.T, cmap=cmap, shading='flat')
+        density_unit, temperature_unit = phase['axis_units']
+        ax.set(xscale='log', yscale='log', xlabel=f'Gas mass density [{density_unit}]',
+               ylabel=f'Gas temperature [{temperature_unit}]')
+        ax.figure.colorbar(image, ax=ax, label='Particle count per bin')
+        if verbose:
+            _print_product_units(phase)
+        if show:
+            plt.show()
+        return ax
+
+    def plot_map(self, image, *, log=None, cmap='magma', ax=None, show=True, verbose=False):
         """Display a prepared map using the current values in its result dictionary.
 
         Returns: ax (matplotlib.axes.Axes): plotted axes for customization or saving.
@@ -398,6 +552,8 @@ class ParticleEmissionCatalogue:
         if not isinstance(image, dict) or image.get('product_type') != 'map':
             raise ValueError('Expected a prepared map.')
         ax = plot_map_result(image, ax=ax, log=log, cmap=cmap)
+        if verbose:
+            _print_product_units(image)
         if show:
             import matplotlib.pyplot as plt
             plt.show()
@@ -405,7 +561,7 @@ class ParticleEmissionCatalogue:
 
     def make_spectrum(self, line, velocity_edges_kms=None, *, wavelength_edges_angstrom=None,
                       rest_wavelength_angstrom=None, los_axis='z', center=None, velocity_frame=None,
-                      aperture_radius_kpc=None, periodic=None, chunk_size=100000):
+                      aperture_radius_kpc=None, periodic=None, chunk_size=100000, verbose=False):
         """Bin line luminosity in velocity or wavelength within a projected aperture.
 
         Supply exactly one set of bin edges. Wavelength mode uses halo-relative
@@ -421,8 +577,11 @@ class ParticleEmissionCatalogue:
         if wavelength_edges_angstrom is None:
             if rest_wavelength_angstrom is not None:
                 raise ValueError('rest_wavelength_angstrom requires wavelength bins.')
-            return self._render(line, [velocity_edges_kms], los_axis, center, velocity_frame,
+            result = self._render(line, [velocity_edges_kms], los_axis, center, velocity_frame,
                                 periodic, chunk_size, aperture_radius_kpc, True)
+            if verbose:
+                _print_product_units(result)
+            return result
 
         edges = _edges(wavelength_edges_angstrom)
         if edges[0] <= 0:
@@ -448,10 +607,12 @@ class ParticleEmissionCatalogue:
                       quantity='luminosity per wavelength bin', wavelength_frame='halo',
                       rest_wavelength_angstrom=rest_wavelength_angstrom,
                       rest_wavelength_source=wavelength_source, doppler_convention='optical')
+        if verbose:
+            _print_product_units(result)
         return result
 
     def make_radial_profile(self, lines=None, bins=20, *, quantity='luminosity',
-                            center=None, periodic=None, chunk_size=100000):
+                            center=None, periodic=None, chunk_size=100000, verbose=False):
         """Bin retained particles in spherical shells around the chosen center.
 
         Use an exact label, a sequence of labels, or None for all saved lines.
@@ -534,15 +695,18 @@ class ParticleEmissionCatalogue:
             if np.any(np.isinf(values[label])):
                 raise ValueError(f'Nonfinite radial values for {label}.')
         included_count = int(counts.sum())
-        return dict(product_type='radial_profile', quantity=quantity, values=values, lines=labels,
+        result = dict(product_type='radial_profile', quantity=quantity, values=values, lines=labels,
                     edges=[edges], axis_names=['radius'], axis_units=['kpc'], unit=PROFILE_UNITS[quantity],
                     center_kpc=center.copy(), periodic=periodic, particle_count=counts,
                     sampled_volume_cm3=volumes, empty_shell=empty,
                     included_particle_count=included_count,
                     excluded_particle_count=self.particle_count - included_count,
                     included_luminosity_erg_s=included, excluded_luminosity_erg_s=excluded)
+        if verbose:
+            _print_product_units(result)
+        return result
 
-    def make_line_ratio(self, profile, *, numerator, denominator, min_denominator=None):
+    def make_line_ratio(self, profile, *, numerator, denominator, min_denominator=None, verbose=False):
         """Divide two shell-luminosity curves from a prepared radial profile.
 
         min_denominator is the minimum accepted denominator luminosity in erg/s.
@@ -560,13 +724,16 @@ class ParticleEmissionCatalogue:
         ratio, valid = _divide_line_values(curves[numerator], curves[denominator],
                                            (len(edges) - 1,), min_denominator)
         label = f'{numerator} / {denominator}'
-        return dict(product_type='radial_profile', quantity='line_ratio', values={label: ratio},
+        result = dict(product_type='radial_profile', quantity='line_ratio', values={label: ratio},
                     lines=(label,), edges=[edges], axis_names=['radius'], axis_units=['kpc'],
                     unit='dimensionless', center_kpc=profile['center_kpc'].copy(),
                     periodic=profile['periodic'], numerator=numerator, denominator=denominator,
                     min_denominator=min_denominator, valid_mask=valid)
+        if verbose:
+            _print_product_units(result)
+        return result
 
-    def make_line_ratio_map(self, numerator_map, denominator_map, *, min_denominator=None):
+    def make_line_ratio_map(self, numerator_map, denominator_map, *, min_denominator=None, verbose=False):
         """Divide prepared luminosity maps on a shared grid and in the same frame.
 
         min_denominator is the minimum accepted denominator luminosity per pixel
@@ -599,9 +766,11 @@ class ParticleEmissionCatalogue:
                       values=ratio, edges=[edge.copy() for edge in edges], valid_mask=valid,
                       line=f'{numerator} / {denominator}', numerator=numerator,
                       denominator=denominator, min_denominator=min_denominator)
+        if verbose:
+            _print_product_units(result)
         return result
 
-    def plot_profile(self, profile, *, ax=None, show=True):
+    def plot_profile(self, profile, *, ax=None, show=True, verbose=False):
         """Plot the supplied radial values without reading the particle catalogue.
 
         Returns: ax (matplotlib.axes.Axes): plotted axes for customization or saving.
@@ -623,11 +792,13 @@ class ParticleEmissionCatalogue:
                   'emission': 'Mean emissivity', 'line_ratio': 'Line ratio'}.get(profile['quantity'], profile['quantity'])
         ax.set(xlabel='Radius [physical kpc]', ylabel=f"{ylabel} [{profile['unit']}]")
         ax.legend()
+        if verbose:
+            _print_product_units(profile)
         if show:
             plt.show()
         return ax
 
-    def plot_spectrum(self, spectrum, *, ax=None, show=True):
+    def plot_spectrum(self, spectrum, *, ax=None, show=True, verbose=False):
         """Display the supplied velocity or wavelength spectrum.
 
         Returns: ax (matplotlib.axes.Axes): axes containing the plotted result.
@@ -645,14 +816,18 @@ class ParticleEmissionCatalogue:
         xlabel = 'Wavelength [Å]' if spectrum['axis_names'] == ['wavelength'] else 'LOS velocity [km/s]'
         ax.set(xlabel=xlabel, ylabel='Luminosity per bin [erg/s]')
         ax.set_title(spectrum['line'])
+        if verbose:
+            _print_product_units(spectrum)
         if show:
             plt.show()
         return ax
 
 
-def read_EmissionCatalogue(filename):
+def read_EmissionCatalogue(filename, *, verbose=False):
     """Open a particle emission catalogue lazily.
+
+    Set verbose=True to print the catalogue's saved units.
 
     Returns: catalogue (ParticleEmissionCatalogue): metadata and rendering interface.
     """
-    return ParticleEmissionCatalogue(filename)
+    return ParticleEmissionCatalogue(filename, verbose=verbose)
