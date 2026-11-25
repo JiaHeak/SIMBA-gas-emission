@@ -185,7 +185,7 @@ display(catalogue.table_metadata['axes'])
 - Excluded luminosity reflects the requested map bounds, aperture or velocity range.
 - Saved Cloudy diagnostics describe input particles, not individual image pixels.
 - Metal-scale clipping, especially assigning an enriched model to Z=0 gas, remains an approximation.
-- Maps are intrinsic luminosity, not observed surface brightness or flux.
+- `image` uses intrinsic luminosity in erg/s per pixel. `brightness` uses observed surface brightness in erg s⁻¹ cm⁻² arcsec⁻².
 
 ## Cell 6 — Make and plot a radial profile
 

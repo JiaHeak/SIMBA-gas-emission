@@ -3,8 +3,10 @@ __pycache__/
 *.py[cod]
 .ipynb_checkpoints/
 .venv/
+.venv-docs/
 venv/
 *.npz
 *.h5
 *.hdf5
 !tests/data/sample_snapshot.hdf5
+/docs/_build/

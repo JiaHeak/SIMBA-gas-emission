@@ -1,8 +1,8 @@
 # Paths may be absolute or relative to this YAML file.
 source:
   type: simba
-  snapshot_filename: /scr/user/jiaheak/SIMBA_data/snap_m50n512_151.hdf5
-  catalogue_filename: /scr/user/jiaheak/Octavius_results/output/octavius_snap_m50n512_151.hdf5
+  snapshot_filename: data/snap_m50n512_151.hdf5
+  catalogue_filename: data/octavius_snap_m50n512_151.hdf5
   redshift: auto  # Snapshot redshift; numerical overrides remain possible
 
 selection:
@@ -26,7 +26,7 @@ unit_factors:
 
 emissivity:
   type: cloudy_hdf5  # ps20 | cloudy_hdf5; both require one HDF5 table
-  table_filename: /scr/user/jiaheak/Cloudy_tables/simba_hot_cgm_multiline.hdf5
+  table_filename: tables/simba_hot_cgm_multiline.hdf5
   # Exact table identifiers, including spaces; output groups follow this order.
   line_labels:
     - 'O  7 21.6000A'
@@ -37,7 +37,7 @@ emissivity:
     - 'Ne10 12.1300A'
   # For PS20, for example:
   # type: ps20
-  # table_filename: /scr/user/jiaheak/Cloudy_tables/UVB_dust1_CR1_G1_shield0_lines.hdf5
+  # table_filename: tables/UVB_dust1_CR1_G1_shield0_lines.hdf5
   # line_labels: ['H  1      6562.81A']
 
 reference_frame:
