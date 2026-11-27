@@ -40,13 +40,10 @@ emissivity:
     - 'H  1 4861.33A'
     - 'O  3 5006.84A'
 
-cube:
-  # Retain the template's PPP geometry; edit these if a different aperture is needed.
-  type: ppp
-  center_kpc: auto
+reference_frame:
+  center_kpc: auto  # Default for Reader; stored coordinates remain in the box frame.
+  bulk_velocity_kms: auto  # Three components; Reader can choose any LOS later.
   periodic: true
-  map_half_width_kpc: 1600
-  spatial_bins: 100
 
 output:
-  filename: /home/jiaheak/SIMBA_CGM_pipeline/Pipeline/datacube_nT_Hden_metals.hdf5
+  filename: particle_emission.hdf5

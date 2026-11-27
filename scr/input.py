@@ -27,7 +27,7 @@ def read_parameters(config_filename) -> dict:
     Catalogue-derived values remain 'auto' until run preparation. Paths use the YAML folder,
     not the shell's working directory. Unknown keys raise rather than disappear.
 
-    Returns: parameters (dict): source, selection, unit_factors, emissivity, cube,
+    Returns: parameters (dict): source, selection, unit_factors, emissivity, reference_frame,
         output, and the absolute config_filename used for provenance.
     """
     config_path = Path(config_filename).expanduser().resolve()
@@ -48,10 +48,10 @@ def read_parameters(config_filename) -> dict:
             raise ValueError(f'{name}: missing keys {sorted(missing)}; unknown keys {sorted(unknown)}.')
         return {**defaults, **values}
 
-    expected = {'source', 'selection', 'unit_factors', 'emissivity', 'cube', 'output'}
+    expected = {'source', 'selection', 'unit_factors', 'emissivity', 'reference_frame', 'output'}
     if config.keys() - expected:
         raise ValueError('Use grouped YAML sections: source, selection, unit_factors, '
-                         'emissivity, cube, output. Unknown top-level keys: '
+                         'emissivity, reference_frame, output. Unknown top-level keys: '
                          f'{sorted(config.keys() - expected)}')
     source = section('source', {'snapshot_filename', 'catalogue_filename'},
                      {'type': 'simba', 'redshift': 'auto'})
@@ -60,13 +60,8 @@ def read_parameters(config_filename) -> dict:
         'solar_mass_g', 'kpc_to_cm', 'specific_energy_to_erg_g', 'z_sun_mass_fraction',
     }, {'gamma': 5.0 / 3.0})
     emissivity = section('emissivity', {'type', 'table_filename', 'line_labels'})
-    cube = section('cube', set(), {
-        'type': 'ppv', 'center_kpc': 'auto', 'periodic': False,
-        'map_half_width_kpc': 100, 'spatial_bins': 2,
-        'velocity_half_width_kms': 300, 'velocity_bins': 2,
-        'los_axis': 'z', 'systemic_velocity_kms': 0.0,
-        'x_edges_kpc': None, 'y_edges_kpc': None, 'z_edges_kpc': None,
-        'velocity_edges_kms': None,
+    frame = section('reference_frame', set(), {
+        'center_kpc': 'auto', 'bulk_velocity_kms': 'auto', 'periodic': True,
     })
     output = section('output', set(), {'filename': 'auto'})
 
@@ -104,20 +99,15 @@ def read_parameters(config_filename) -> dict:
         raise ValueError('emissivity.line_labels must be a nonempty list of exact table identifiers.')
     if len(set(labels)) != len(labels):
         raise ValueError('emissivity.line_labels contains repeated labels.')
-    if cube['type'] not in ('ppv', 'ppp'):
-        raise ValueError('cube.type must be ppv or ppp.')
-    if not isinstance(cube['periodic'], bool):
-        raise ValueError('cube.periodic must be a YAML boolean (true or false).')
-    center = cube['center_kpc']
-    if not (isinstance(center, str) and center == 'auto'):
-        if not isinstance(center, list) or len(center) != 3:
-            raise ValueError('cube.center_kpc must be auto or a list of three finite coordinates.')
-        cube['center_kpc'] = [number(value, 'cube.center_kpc') for value in center]
-    systemic = cube['systemic_velocity_kms']
-    if cube['type'] == 'ppv' and systemic != 'auto':
-        cube['systemic_velocity_kms'] = number(systemic, 'cube.systemic_velocity_kms')
-    # Keep the existing cube-builder keyword; YAML uses the shorter cube.type.
-    cube['cube_type'] = cube.pop('type')
+    if not isinstance(frame['periodic'], bool):
+        raise ValueError('reference_frame.periodic must be a boolean.')
+    for name in ('center_kpc', 'bulk_velocity_kms'):
+        value = frame[name]
+        if isinstance(value, str) and value == 'auto':
+            continue
+        if not isinstance(value, list) or len(value) != 3:
+            raise ValueError(f'reference_frame.{name} must be auto or three numbers.')
+        frame[name] = [number(x, name) for x in value]
 
     def resolve_path(value, name):
         """Resolve an explicitly supplied input or output filename.
@@ -135,16 +125,16 @@ def read_parameters(config_filename) -> dict:
         source[key] = resolve_path(source[key], f'source.{key}')
     emissivity['table_filename'] = resolve_path(emissivity['table_filename'], 'emissivity.table_filename')
     if output['filename'] == 'auto':
-        output['filename'] = f"line_cubes_{cube['cube_type']}_halo_{index}.hdf5"
+        output['filename'] = f"particle_emission_halo_{index}.hdf5"
     output['filename'] = resolve_path(output['filename'], 'output.filename')
     suffix = Path(output['filename']).suffix.lower()
     if not suffix:
         output['filename'] += '.hdf5'
     elif suffix not in ('.hdf5', '.h5'):
-        raise ValueError('output.filename must end in .hdf5 or .h5; NPZ cube output is no longer supported.')
+        raise ValueError('output.filename must end in .hdf5 or .h5; NPZ catalogue output is no longer supported.')
     return {
         'source': source, 'selection': selection, 'unit_factors': units,
-        'emissivity': emissivity, 'cube': cube, 'output': output,
+        'emissivity': emissivity, 'reference_frame': frame, 'output': output,
         'config_filename': str(config_path),
     }
 

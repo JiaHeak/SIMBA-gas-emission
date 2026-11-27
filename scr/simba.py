@@ -165,9 +165,9 @@ def select_cgm_gas_rows(snapshot_filename, catalogue_filename, gas_rows,
     m_p = PROTON_MASS_G  # Same constant as convert_gas_fields(), in g
     k_B = 1.380649e-16  # erg/K
 
-    cat = load_catalogue(catalogue_filename)
-    r200m = cat.haloes.get_dataset('r200m', to_physical=True, to_units='kpc')[target_index]
-    minpot_pos = cat.haloes.get_dataset('minpot_pos', to_physical=True, to_units='kpc')[target_index]
+    with load_catalogue(catalogue_filename) as cat:
+        r200m = cat.haloes.get_dataset('r200m', to_physical=True, to_units='kpc')[target_index]
+        minpot_pos = cat.haloes.get_dataset('minpot_pos', to_physical=True, to_units='kpc')[target_index]
     sorted_order = np.argsort(gas_rows)
     sorted_indices = gas_rows[sorted_order]
     restore_order = np.argsort(sorted_order)
@@ -180,7 +180,6 @@ def select_cgm_gas_rows(snapshot_filename, catalogue_filename, gas_rows,
         box_kpc = f['Header'].attrs['BoxSize'] * position_factor
 
         for i in range(3):
-            print('The gas min coordinates:', gas_coors[:, i].min())
             gas_coors[:, i] -= minpot_pos[i]
             gas_coors[:, i] -= box_kpc * np.rint(gas_coors[:, i] / box_kpc)
 
@@ -281,31 +280,15 @@ def get_gas_fields(filename, gas_rows, components=SIMBA_GAS_COMPONENTS) -> dict:
         }
 
 
-def convert_gas_fields(                 # This is given by Codex, we should make sure the unit convention !!!
-    raw_fields: dict, *, position_to_physical_kpc: float, velocity_to_kms: float, mass_to_g: float,
-    density_to_g_cm3: float, specific_energy_to_erg_g: float, z_sun_mass_fraction: float, gamma: float = 5.0 / 3.0 ) -> dict:
-    """Convert selected SIMBA arrays to the physical fields used downstream.
+def gas_temperature_and_hydrogen_fraction(raw_fields, *, specific_energy_to_erg_g, gamma=5.0 / 3.0):
+    """Convert specific internal energy using the SIMBA H, He and electron abundances.
 
-    Conversion factors must already account for the snapshot's scale factor
-    and Hubble convention. The abundance columns and electron abundance are
-    interpreted according to the SIMBA snapshot convention.
-
-    Returns: gas_fields (dict): aligned physical positions, velocities, mass,
-        density, volume, temperature, hydrogen density, and abundance arrays.
+    Returns: thermal_state (tuple[numpy.ndarray, numpy.ndarray]): temperature in K
+        and dimensionless hydrogen mass fraction, aligned by particle.
     """
     proton_mass_g = PROTON_MASS_G
     boltzmann_erg_k = 1.380649e-16
 
-    coordinates = np.asarray(
-        raw_fields['PartType0/Coordinates'], dtype=np.float64
-    ) * position_to_physical_kpc
-    velocities = np.asarray(
-        raw_fields['PartType0/Velocities'], dtype=np.float64
-    ) * velocity_to_kms
-    mass_g = np.asarray(raw_fields['PartType0/Masses'], dtype=np.float64) * mass_to_g
-    rho_g_cm3 = np.asarray(
-        raw_fields['PartType0/Density'], dtype=np.float64
-    ) * density_to_g_cm3
     internal_energy_erg_g = np.asarray(
         raw_fields['PartType0/InternalEnergy'], dtype=np.float64
     ) * specific_energy_to_erg_g
@@ -334,6 +317,36 @@ def convert_gas_fields(                 # This is given by Codex, we should make
         / boltzmann_erg_k
     )
 
+    return temperature_k, hydrogen_mass_fraction
+
+
+def convert_gas_fields(                 # This is given by Codex, we should make sure the unit convention !!!
+    raw_fields: dict, *, position_to_physical_kpc: float, velocity_to_kms: float, mass_to_g: float,
+    density_to_g_cm3: float, specific_energy_to_erg_g: float, z_sun_mass_fraction: float, gamma: float = 5.0 / 3.0 ) -> dict:
+    """Convert selected SIMBA arrays to the physical fields used downstream.
+
+    Conversion factors must already account for the snapshot's scale factor
+    and Hubble convention. The abundance columns and electron abundance are
+    interpreted according to the SIMBA snapshot convention.
+
+    Returns: gas_fields (dict): aligned physical positions, velocities, mass,
+        density, volume, temperature, hydrogen density, and abundance arrays.
+    """
+    coordinates = np.asarray(
+        raw_fields['PartType0/Coordinates'], dtype=np.float64
+    ) * position_to_physical_kpc
+    velocities = np.asarray(
+        raw_fields['PartType0/Velocities'], dtype=np.float64
+    ) * velocity_to_kms
+    mass_g = np.asarray(raw_fields['PartType0/Masses'], dtype=np.float64) * mass_to_g
+    rho_g_cm3 = np.asarray(
+        raw_fields['PartType0/Density'], dtype=np.float64
+    ) * density_to_g_cm3
+    abundances = np.asarray(raw_fields['PartType0/Metallicity'], dtype=np.float64)
+    Z_mass_fraction = abundances[:, 0]
+    temperature_k, hydrogen_mass_fraction = gas_temperature_and_hydrogen_fraction(
+        raw_fields, specific_energy_to_erg_g=specific_energy_to_erg_g, gamma=gamma)
+
     return {
         'particle_id': raw_fields['PartType0/ParticleIDs'],
         'x_kpc': coordinates[:, 0],
@@ -345,7 +358,7 @@ def convert_gas_fields(                 # This is given by Codex, we should make
         'mass_g': mass_g,
         'rho_g_cm3': rho_g_cm3,
         'volume_cm3': mass_g / rho_g_cm3,
-        'nH_cm3': hydrogen_mass_fraction * rho_g_cm3 / proton_mass_g,
+        'nH_cm3': hydrogen_mass_fraction * rho_g_cm3 / PROTON_MASS_G,
         'T_K': temperature_k,
         'Z_Zsun': Z_mass_fraction / z_sun_mass_fraction,
         # Preserve the actual particle fractions for Cloudy's metal/H mapping.
@@ -379,3 +392,20 @@ def get_redshift(snapshot_filename: str) -> float:
     """
     with h5py.File(snapshot_filename, 'r') as snapshot:
         return float(snapshot['Header'].attrs['Redshift'])
+
+
+def load_catalogue_gas_fields(snapshot_filename, gas_rows, unit_factors):
+    """Load physical gas plus the original rows and physical kernel support radii.
+
+    Returns: gas (dict): aligned particle fields in the simulation-box frame.
+    """
+    components = [*SIMBA_GAS_COMPONENTS, 'PartType0/SmoothingLength']
+    raw = get_gas_fields(snapshot_filename, gas_rows, components)
+    conversion = {name: value for name, value in unit_factors.items()
+                  if name not in ('kpc_to_cm', 'scale_factor', 'hubble_param',
+                                  'cosmological_factors', 'unit_conversions')}
+    gas = convert_gas_fields(raw, **conversion)
+    gas['snapshot_row'] = np.asarray(gas_rows, dtype=np.int64)
+    gas['smoothing_length_kpc'] = (np.asarray(raw['PartType0/SmoothingLength'], dtype=float)
+                                   * unit_factors['position_to_physical_kpc'])
+    return gas
